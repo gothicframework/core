@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    name: Go Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Install gotestfmt
+        run: go install github.com/gotesttools/gotestfmt/v2/cmd/gotestfmt@latest
+
+      # Build sanity: internal/scaffold/ holds the `gothic init` scaffold, which
+      # includes non-Go template files (e.g. server/server.go begins with
+      # `{{.MainServerPackageName}}`) and package sources that import the sibling
+      # `components` module. Those are embedded bytes, never compiled here, so the
+      # package list excludes internal/scaffold. wasm/core-runtime is the js&&wasm
+      # static-core entrypoint (no host-buildable files), so it is excluded too —
+      # its host-side behavior is covered by the *_stub.go mirrors under
+      # wasm/wasm-runtime/runtime. Mirrors the monorepo's package-naming convention.
+      - name: Run tests
+        run: |
+          PKGS=$(GOWORK=off go list -e ./... 2>/dev/null \
+            | grep -v '/internal/scaffold' \
+            | grep -v '/wasm/core-runtime$')
+          GOWORK=off go test $PKGS -json -coverprofile=coverage.out -covermode=atomic -timeout 60s \
+            2>&1 | tee /tmp/gotest.log | gotestfmt
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          files: coverage.out
+          fail_ci_if_error: true
+        env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}

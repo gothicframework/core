@@ -1,0 +1,19 @@
+coverage:
+  status:
+    project:
+      default:
+        target: 80%
+        threshold: 2%
+    patch:
+      default:
+        target: 80%
+        threshold: 5%
+
+ignore:
+  - "internal/scaffold/**/*"
+  - "**/*_templ.go"
+  - "**/*_gen.go"
+  - "cmd/gothic/main.go"
+  - "internal/cmd/root.go"
+  - "internal/cmd/testdata/**/*"
+  - "wasm/internal/parity/**/*"

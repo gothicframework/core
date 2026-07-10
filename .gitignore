@@ -1,0 +1,9 @@
+# OS / editor cruft
+.DS_Store
+*~
+*.swp
+
+# Go build/test artifacts
+/vendor/
+*.test
+coverage.out
