@@ -59,6 +59,13 @@ type AWSProvider struct {
 	Region        string
 	Profile       string
 	Stages        map[string]Stage
+	// CDN tunes how the CloudFront distribution caches and forwards the dynamic
+	// (server) requests: which query params, cookies, and request headers reach your
+	// app and vary its cache. Its zero value keeps ALL query params (so ?lang=PT and
+	// ?lang=ENG render and cache independently) and forwards no cookies or headers —
+	// the safe default for a Lambda Function URL behind Origin Access Control. Set
+	// each field with the gothic.Allow* builders. See CDNConfig (config/cdn.go).
+	CDN CDNConfig
 }
 
 // Stage is the per-stage configuration declared inside Deploy.Providers.AWS.Stages.
