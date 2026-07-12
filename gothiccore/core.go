@@ -17,6 +17,9 @@ import (
 	"encoding/hex"
 	"os"
 	"path/filepath"
+
+	"github.com/tdewolff/minify/v2"
+	minifyjs "github.com/tdewolff/minify/v2/js"
 )
 
 // FileName is the emitted asset's basename under public/.
@@ -263,11 +266,34 @@ const JS = `// gothic-core.js — shared idempotent Gothic WASM runtime (Phase 1
 })();
 `
 
-// hash is the hex sha256 of JS, truncated to 16 chars. It is the cache-buster
-// query value: it changes whenever JS changes, so a new CLI version invalidates
-// any browser-cached copy while an unchanged core stays immutably cached.
+// minified is the SERVED form of gothic-core.js: JS run through a real JS
+// minifier once at package init. The JS const above stays the readable,
+// maintained source of truth; browsers only ever receive the minified bytes, so
+// the layout's "Minify JavaScript" audit is clean and the download is smaller
+// (on top of the gzip/brotli the /_gothic/ handler applies over the wire). If
+// minification ever fails, we fall back to the readable source rather than
+// serving nothing.
+var minified = func() []byte {
+	m := minify.New()
+	m.AddFunc("text/javascript", minifyjs.Minify)
+	out, err := m.Bytes("text/javascript", []byte(JS))
+	if err != nil || len(out) == 0 {
+		return []byte(JS)
+	}
+	return out
+}()
+
+// Minified returns the minified gothic-core.js bytes actually served under
+// /_gothic/ (and emitted by Write). Its content hash is Version().
+func Minified() []byte { return minified }
+
+// hash is the hex sha256 of the MINIFIED bytes, truncated to 16 chars. It is the
+// cache-buster query value: it changes whenever the served content changes, so a
+// new CLI version invalidates any browser-cached copy while an unchanged core
+// stays immutably cached. (Hashing the served bytes — not the readable source —
+// keeps the ?v= in lockstep with what the browser actually downloads.)
 var hash = func() string {
-	sum := sha256.Sum256([]byte(JS))
+	sum := sha256.Sum256(minified)
 	return hex.EncodeToString(sum[:])[:16]
 }()
 
@@ -279,12 +305,13 @@ func Version() string { return hash }
 // the framework embed via the /_gothic/ route (no longer copied into public/).
 func AssetPath() string { return "/_gothic/" + FileName + "?v=" + hash }
 
-// Write emits gothic-core.js into publicDir (creating it if needed). Called at
-// init (to seed the file) and on every build (so existing projects pick up a new
-// core when the CLI is upgraded). Idempotent: overwrites in place.
+// Write emits the (minified) gothic-core.js into publicDir (creating it if
+// needed). Called at init (to seed the file) and on every build (so existing
+// projects pick up a new core when the CLI is upgraded). Idempotent: overwrites
+// in place. It writes the same bytes the /_gothic/ handler serves.
 func Write(publicDir string) error {
 	if err := os.MkdirAll(publicDir, 0755); err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(publicDir, FileName), []byte(JS), 0644)
+	return os.WriteFile(filepath.Join(publicDir, FileName), minified, 0644)
 }

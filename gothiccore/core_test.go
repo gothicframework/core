@@ -24,7 +24,9 @@ func TestVersionStable(t *testing.T) {
 	}
 }
 
-// TestWriteEmitsAsset verifies Write emits the JS byte-for-byte.
+// TestWriteEmitsAsset verifies Write emits the served (minified) bytes
+// byte-for-byte — the same content the /_gothic/ handler serves and that
+// Version() hashes.
 func TestWriteEmitsAsset(t *testing.T) {
 	dir := t.TempDir()
 	if err := Write(filepath.Join(dir, "public")); err != nil {
@@ -34,8 +36,20 @@ func TestWriteEmitsAsset(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read: %v", err)
 	}
-	if string(got) != JS {
-		t.Errorf("emitted asset does not match JS const")
+	if string(got) != string(Minified()) {
+		t.Errorf("emitted asset does not match Minified()")
+	}
+}
+
+// TestMinifiedIsSmaller sanity-checks that minification actually ran (the served
+// bytes are smaller than the readable source) and is non-empty.
+func TestMinifiedIsSmaller(t *testing.T) {
+	m := Minified()
+	if len(m) == 0 {
+		t.Fatal("Minified() is empty")
+	}
+	if len(m) >= len(JS) {
+		t.Errorf("Minified() (%d bytes) is not smaller than source JS (%d bytes)", len(m), len(JS))
 	}
 }
 

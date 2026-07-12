@@ -5,32 +5,46 @@
 // under a dedicated route prefix (/_gothic/), so a framework upgrade updates the
 // runtime for every project with no file churn and no stale copies.
 //
-// The five runtime assets served here:
+// The runtime assets served here:
 //
-//	gothic-core.js       the shared idempotent client runtime (pkg/helpers/gothiccore)
-//	gothic-core.wasm     the prebuilt full-Go static core module (pkg/helpers/corewasm)
-//	gothic-core-exec.js  the standard-Go wasm_exec shim matched to the core (corewasm)
-//	gothic-core-boot.js  the generated core boot loader (corewasm)
-//	wasm_exec.js         the TinyGo wasm_exec shim (pkg/data/wasm_exec)
+//	gothic-core.js              the shared idempotent client runtime (gothiccore, minified)
+//	gothic-core.wasm            the prebuilt full-Go static core module (corewasm)
+//	gothic-core-exec.js         the standard-Go wasm_exec shim matched to the core (corewasm)
+//	gothic-core-boot.js         the generated core boot loader (corewasm)
+//	wasm_exec.js                the TinyGo wasm_exec shim (wasmexec)
+//	htmx.min.js                 HTMX, self-hosted (vendorjs) — no longer a render-blocking CDN <script>
+//	amz-content-sha256.min.js   the amz-content-sha256 HTMX extension (vendorjs)
+//
+// Every asset is content-negotiated: the handler precompresses each one with
+// brotli and gzip at startup and serves the smallest form the client accepts
+// (Content-Encoding: br|gzip), falling back to the raw bytes. This is what makes
+// the ~1.9 MB gothic-core.wasm transfer at a fraction of its size on routes that
+// serve it through this handler (a CDN in front is free to keep doing its own
+// compression too).
 //
 // NOTE the user's own GOROOT-matched wasm_exec_go.js stays in public/ (it is
 // version-tied to the user's Go toolchain, copied at build time — not a framework
 // artifact) and the per-page user WASM binaries stay under /public/wasm/.
 //
-// This is a LEAF package over the three asset-owning leaf packages (gothiccore,
-// corewasm, wasmexec). Those packages must NOT import runtimeassets or a cycle
-// forms — runtimeassets sits one level above them.
+// This is a LEAF package over the asset-owning leaf packages (gothiccore,
+// corewasm, wasmexec, vendorjs). Those packages must NOT import runtimeassets or a
+// cycle forms — runtimeassets sits one level above them.
 package runtimeassets
 
 import (
+	"bytes"
+	"compress/gzip"
 	"crypto/sha256"
 	"encoding/hex"
 	"net/http"
+	"strconv"
 	"strings"
 
-	wasmexec "github.com/gothicframework/core/wasmexec"
+	"github.com/andybalholm/brotli"
 	"github.com/gothicframework/core/corewasm"
 	"github.com/gothicframework/core/gothiccore"
+	"github.com/gothicframework/core/vendorjs"
+	wasmexec "github.com/gothicframework/core/wasmexec"
 )
 
 // Prefix is the route namespace the framework serves its runtime assets under.
@@ -46,11 +60,14 @@ const (
 )
 
 // Asset is one served runtime file: its basename (the path segment after the
-// prefix), the bytes to write, its Content-Type, and the content-hash used as
-// the ?v= cache-buster in the URL that references it.
+// prefix), the raw bytes, precompressed brotli/gzip variants (nil when a variant
+// is not smaller than the raw bytes), its Content-Type, and the content-hash used
+// as the ?v= cache-buster in the URL that references it.
 type Asset struct {
 	Name        string
-	Bytes       []byte
+	Bytes       []byte // identity (uncompressed)
+	Brotli      []byte // brotli-compressed, or nil if not smaller than Bytes
+	Gzip        []byte // gzip-compressed, or nil if not smaller than Bytes
 	ContentType string
 	Version     string
 }
@@ -62,45 +79,72 @@ func hash16(b []byte) string {
 	return hex.EncodeToString(sum[:])[:16]
 }
 
+// gzipBytes returns b gzip-compressed at max level, or nil if compression did not
+// shrink it (tiny/already-compressed inputs) so the handler serves raw instead.
+func gzipBytes(b []byte) []byte {
+	var buf bytes.Buffer
+	zw, err := gzip.NewWriterLevel(&buf, gzip.BestCompression)
+	if err != nil {
+		return nil
+	}
+	if _, err := zw.Write(b); err != nil {
+		return nil
+	}
+	if err := zw.Close(); err != nil {
+		return nil
+	}
+	if buf.Len() >= len(b) {
+		return nil
+	}
+	return buf.Bytes()
+}
+
+// brotliBytes returns b brotli-compressed at max level, or nil if it did not
+// shrink. Brotli typically beats gzip on these text/wasm assets, so it is offered
+// first in negotiation.
+func brotliBytes(b []byte) []byte {
+	var buf bytes.Buffer
+	bw := brotli.NewWriterLevel(&buf, brotli.BestCompression)
+	if _, err := bw.Write(b); err != nil {
+		return nil
+	}
+	if err := bw.Close(); err != nil {
+		return nil
+	}
+	if buf.Len() >= len(b) {
+		return nil
+	}
+	return buf.Bytes()
+}
+
+// newAsset builds an Asset, precomputing its compressed variants once at startup.
+func newAsset(name string, b []byte, contentType, version string) Asset {
+	return Asset{
+		Name:        name,
+		Bytes:       b,
+		Brotli:      brotliBytes(b),
+		Gzip:        gzipBytes(b),
+		ContentType: contentType,
+		Version:     version,
+	}
+}
+
 // wasmExecShimHash content-hashes the TinyGo wasm_exec shim locally: unlike the
-// other four assets, pkg/data/wasm_exec exposes only the bytes (Shim), not a
-// Version(), so we compute its cache-buster here.
+// other assets, wasmexec exposes only the bytes (Shim), not a Version(), so we
+// compute its cache-buster here.
 var wasmExecShimHash = hash16(wasmexec.Shim)
 
 // registry is the name→Asset lookup. Bytes and hashes are pulled from the
 // asset-owning leaf packages so there is a single source of truth per artifact.
 var registry = func() map[string]Asset {
 	list := []Asset{
-		{
-			Name:        gothiccore.FileName, // gothic-core.js
-			Bytes:       []byte(gothiccore.JS),
-			ContentType: contentTypeJS,
-			Version:     gothiccore.Version(),
-		},
-		{
-			Name:        corewasm.WASMFileName, // gothic-core.wasm
-			Bytes:       corewasm.CoreWASM(),
-			ContentType: contentTypeWASM,
-			Version:     corewasm.CoreHash(),
-		},
-		{
-			Name:        corewasm.ExecFileName, // gothic-core-exec.js
-			Bytes:       corewasm.ExecJS(),
-			ContentType: contentTypeJS,
-			Version:     corewasm.ExecHash(),
-		},
-		{
-			Name:        corewasm.BootFileName, // gothic-core-boot.js
-			Bytes:       corewasm.BootJS(),
-			ContentType: contentTypeJS,
-			Version:     corewasm.Version(),
-		},
-		{
-			Name:        "wasm_exec.js", // TinyGo shim
-			Bytes:       wasmexec.Shim,
-			ContentType: contentTypeJS,
-			Version:     wasmExecShimHash,
-		},
+		newAsset(gothiccore.FileName, gothiccore.Minified(), contentTypeJS, gothiccore.Version()),       // gothic-core.js (minified)
+		newAsset(corewasm.WASMFileName, corewasm.CoreWASM(), contentTypeWASM, corewasm.CoreHash()),      // gothic-core.wasm
+		newAsset(corewasm.ExecFileName, corewasm.ExecJS(), contentTypeJS, corewasm.ExecHash()),          // gothic-core-exec.js
+		newAsset(corewasm.BootFileName, corewasm.BootJS(), contentTypeJS, corewasm.Version()),           // gothic-core-boot.js
+		newAsset("wasm_exec.js", wasmexec.Shim, contentTypeJS, wasmExecShimHash),                        // TinyGo shim
+		newAsset(vendorjs.HtmxFileName, vendorjs.HtmxJS(), contentTypeJS, vendorjs.HtmxVersion()),       // htmx.min.js (self-hosted)
+		newAsset(vendorjs.AmzExtFileName, vendorjs.AmzExtJS(), contentTypeJS, vendorjs.AmzExtVersion()), // amz-content-sha256.min.js
 	}
 	m := make(map[string]Asset, len(list))
 	for _, a := range list {
@@ -130,10 +174,53 @@ func Path(name, version string) string {
 	return Prefix + name + "?v=" + version
 }
 
+// negotiateEncoding picks the best Content-Encoding the client accepts from the
+// two we precompute: brotli first (smaller on our assets), then gzip. It honors
+// an explicit q=0 (a client opting an encoding OUT) and the "*" wildcard, and
+// returns "" (serve identity) when neither is acceptable.
+func negotiateEncoding(accept string) string {
+	if accept == "" {
+		return ""
+	}
+	var br, gz bool
+	for _, part := range strings.Split(accept, ",") {
+		tok := strings.TrimSpace(part)
+		if tok == "" {
+			continue
+		}
+		name := tok
+		if i := strings.IndexByte(tok, ';'); i >= 0 {
+			name = strings.TrimSpace(tok[:i])
+			rest := tok[i+1:]
+			if j := strings.Index(strings.ToLower(rest), "q="); j >= 0 {
+				if q, err := strconv.ParseFloat(strings.TrimSpace(rest[j+2:]), 64); err == nil && q == 0 {
+					continue // this encoding explicitly disallowed
+				}
+			}
+		}
+		switch strings.ToLower(name) {
+		case "br":
+			br = true
+		case "gzip":
+			gz = true
+		case "*":
+			br, gz = true, true
+		}
+	}
+	if br {
+		return "br"
+	}
+	if gz {
+		return "gzip"
+	}
+	return ""
+}
+
 // Handler serves the runtime assets under Prefix. It strips the prefix, looks the
 // file up in the registry, sets the right Content-Type, marks it immutable when a
-// ?v= cache-buster is present (mirroring immutableCacheMiddleware), and writes the
-// bytes. Unknown names 404. Only GET/HEAD are meaningful; other methods 405.
+// ?v= cache-buster is present (mirroring immutableCacheMiddleware), negotiates a
+// compressed encoding from Accept-Encoding, and writes the bytes. Unknown names
+// 404. Only GET/HEAD are meaningful; other methods 405.
 func Handler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
@@ -152,16 +239,35 @@ func Handler() http.Handler {
 			http.NotFound(w, r)
 			return
 		}
-		w.Header().Set("Content-Type", asset.ContentType)
+		h := w.Header()
+		h.Set("Content-Type", asset.ContentType)
+		// Response varies by Accept-Encoding (we serve br/gzip/identity of the
+		// same URL), so caches must key on it.
+		h.Set("Vary", "Accept-Encoding")
 		// A ?v=<hash> cache-buster means the URL is content-addressed: cache it
 		// immutably for a year. A framework upgrade changes the hash (hence the
 		// URL), so the cache is busted automatically.
 		if r.URL.Query().Get("v") != "" {
-			w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+			h.Set("Cache-Control", "public, max-age=31536000, immutable")
 		}
+
+		body := asset.Bytes
+		switch negotiateEncoding(r.Header.Get("Accept-Encoding")) {
+		case "br":
+			if asset.Brotli != nil {
+				h.Set("Content-Encoding", "br")
+				body = asset.Brotli
+			}
+		case "gzip":
+			if asset.Gzip != nil {
+				h.Set("Content-Encoding", "gzip")
+				body = asset.Gzip
+			}
+		}
+		h.Set("Content-Length", strconv.Itoa(len(body)))
 		if r.Method == http.MethodHead {
 			return
 		}
-		w.Write(asset.Bytes)
+		w.Write(body)
 	})
 }

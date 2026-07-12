@@ -22,7 +22,15 @@ type Config struct {
 
 // OptimizeImagesConfig controls image optimization defaults.
 type OptimizeImagesConfig struct {
+	// LowResolutionRate is the percentage (of the original width/height) used for
+	// the small blurred placeholder variant. Defaults to 20 when <= 0.
 	LowResolutionRate int
+	// Quality is the encode quality (1–100) applied to the full-size "original"
+	// variant for lossy formats (JPEG and WebP). Lower means a smaller file. It
+	// exists to stop `gothic optimize-images` from emitting a near-lossless
+	// original that balloons a detailed image to several MB. Defaults to 80 when
+	// <= 0; values are clamped to [1,100]. It does not affect PNG (lossless).
+	Quality int
 }
 
 // Provider selects which cloud the stack deploys to. v3 ships AWS only; GCP and

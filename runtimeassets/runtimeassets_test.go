@@ -1,24 +1,31 @@
 package runtimeassets
 
 import (
+	"bytes"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
-	wasmexec "github.com/gothicframework/core/wasmexec"
+	"github.com/andybalholm/brotli"
 	"github.com/gothicframework/core/corewasm"
 	"github.com/gothicframework/core/gothiccore"
+	"github.com/gothicframework/core/vendorjs"
+	wasmexec "github.com/gothicframework/core/wasmexec"
 )
 
-// TestRegistryHasAllFiveAssets guards that every runtime asset that used to be
-// copied into public/ is registered and served from the framework embed.
-func TestRegistryHasAllFiveAssets(t *testing.T) {
+// TestRegistryHasAllAssets guards that every runtime asset the framework serves
+// from its embed (the ones that used to be copied into public/, plus the
+// self-hosted third-party scripts) is registered.
+func TestRegistryHasAllAssets(t *testing.T) {
 	want := []string{
-		gothiccore.FileName,   // gothic-core.js
-		corewasm.WASMFileName, // gothic-core.wasm
-		corewasm.ExecFileName, // gothic-core-exec.js
-		corewasm.BootFileName, // gothic-core-boot.js
-		"wasm_exec.js",        // TinyGo shim
+		gothiccore.FileName,     // gothic-core.js
+		corewasm.WASMFileName,   // gothic-core.wasm
+		corewasm.ExecFileName,   // gothic-core-exec.js
+		corewasm.BootFileName,   // gothic-core-boot.js
+		"wasm_exec.js",          // TinyGo shim
+		vendorjs.HtmxFileName,   // htmx.min.js (self-hosted)
+		vendorjs.AmzExtFileName, // amz-content-sha256.min.js
 	}
 	if len(All()) != len(want) {
 		t.Errorf("registry has %d assets, want %d", len(All()), len(want))
@@ -45,11 +52,13 @@ func TestAssetBytesMatchSources(t *testing.T) {
 		want []byte
 		ct   string
 	}{
-		gothiccore.FileName:   {[]byte(gothiccore.JS), contentTypeJS},
-		corewasm.WASMFileName: {corewasm.CoreWASM(), contentTypeWASM},
-		corewasm.ExecFileName: {corewasm.ExecJS(), contentTypeJS},
-		corewasm.BootFileName: {corewasm.BootJS(), contentTypeJS},
-		"wasm_exec.js":        {wasmexec.Shim, contentTypeJS},
+		gothiccore.FileName:     {gothiccore.Minified(), contentTypeJS},
+		corewasm.WASMFileName:   {corewasm.CoreWASM(), contentTypeWASM},
+		corewasm.ExecFileName:   {corewasm.ExecJS(), contentTypeJS},
+		corewasm.BootFileName:   {corewasm.BootJS(), contentTypeJS},
+		"wasm_exec.js":          {wasmexec.Shim, contentTypeJS},
+		vendorjs.HtmxFileName:   {vendorjs.HtmxJS(), contentTypeJS},
+		vendorjs.AmzExtFileName: {vendorjs.AmzExtJS(), contentTypeJS},
 	}
 	for name, c := range cases {
 		a, _ := Get(name)
@@ -79,8 +88,54 @@ func TestHandlerServesAssetImmutable(t *testing.T) {
 	if cc := rec.Header().Get("Cache-Control"); cc != "public, max-age=31536000, immutable" {
 		t.Errorf("Cache-Control %q, want immutable", cc)
 	}
-	if rec.Body.String() != gothiccore.JS {
-		t.Errorf("served body does not match gothic-core.js")
+	// No Accept-Encoding on the request → identity bytes (the minified source).
+	if enc := rec.Header().Get("Content-Encoding"); enc != "" {
+		t.Errorf("Content-Encoding %q, want identity (no Accept-Encoding sent)", enc)
+	}
+	if rec.Body.String() != string(gothiccore.Minified()) {
+		t.Errorf("served body does not match minified gothic-core.js")
+	}
+}
+
+// TestHandlerNegotiatesCompression verifies the handler serves the brotli/gzip
+// variant when the client accepts it (the lever that shrinks the ~1.9 MB core
+// wasm over the wire), advertises Vary, and decompresses back to the raw bytes.
+func TestHandlerNegotiatesCompression(t *testing.T) {
+	h := Handler()
+
+	// brotli preferred over gzip when both are offered.
+	req := httptest.NewRequest(http.MethodGet, Prefix+corewasm.WASMFileName+"?v="+corewasm.CoreHash(), nil)
+	req.Header.Set("Accept-Encoding", "gzip, br")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d, want 200", rec.Code)
+	}
+	if enc := rec.Header().Get("Content-Encoding"); enc != "br" {
+		t.Errorf("Content-Encoding %q, want br", enc)
+	}
+	if v := rec.Header().Get("Vary"); v != "Accept-Encoding" {
+		t.Errorf("Vary %q, want Accept-Encoding", v)
+	}
+	if rec.Body.Len() >= len(corewasm.CoreWASM()) {
+		t.Errorf("brotli body (%d) not smaller than raw wasm (%d)", rec.Body.Len(), len(corewasm.CoreWASM()))
+	}
+	br := brotli.NewReader(bytes.NewReader(rec.Body.Bytes()))
+	got, err := io.ReadAll(br)
+	if err != nil {
+		t.Fatalf("brotli decode: %v", err)
+	}
+	if !bytes.Equal(got, corewasm.CoreWASM()) {
+		t.Errorf("decompressed brotli body does not match the raw wasm")
+	}
+
+	// gzip when br is opted out with q=0.
+	req = httptest.NewRequest(http.MethodGet, Prefix+corewasm.WASMFileName, nil)
+	req.Header.Set("Accept-Encoding", "br;q=0, gzip")
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if enc := rec.Header().Get("Content-Encoding"); enc != "gzip" {
+		t.Errorf("Content-Encoding %q, want gzip (br opted out)", enc)
 	}
 }
 
