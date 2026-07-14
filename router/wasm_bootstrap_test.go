@@ -468,7 +468,8 @@ func TestInjectWasmBootstrap_TeardownPreambleInjected(t *testing.T) {
 		`queueMicrotask(function(){window.__gothicTeardown(id);})`,
 		// The teardown function itself and each reference it drops.
 		`window.__gothicTeardown=function(id)`,
-		`reg.__onUnmount`,
+		// Every registered unmount callback is iterated (list-based, not a single slot).
+		`if(reg.__onUnmounts){for(var u=0;u<reg.__onUnmounts.length;u++){var F=reg.__onUnmounts[u];if(F){try{F();}catch(e){}}}}`,
 		`document.removeEventListener(L.type,L.fn)`,
 		`delete window.__gothic_registry[id]`,
 		`delete window.__gothic_set[id]`,

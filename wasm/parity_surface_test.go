@@ -39,7 +39,10 @@ func TestUserFacingStubParity(t *testing.T) {
 		"CreateWasmFunc", "CreateWasmStringFunc", "CreateWasmBoolFunc",
 		"CreateWasmFuncWithReturn", "AddEventListener", "AddEventListenerWithEvent",
 		// HTTP
-		"Fetch", "FetchBytes",
+		"Fetch", "FetchAsync", "FetchChan",
+		// typed JSON decode/encode (Phase 6/7) — rewritten to generated
+		// _jsonDecode_T / _jsonEncode_T in WASM
+		"Decode", "Encode",
 		// storage / cookies
 		"LocalStorageSet", "LocalStorageGet", "LocalStorageRemove",
 		"SessionStorageSet", "SessionStorageGet", "SessionStorageRemove",

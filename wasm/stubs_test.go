@@ -36,12 +36,23 @@ func TestServerStubs_NoOpsDoNotPanic(t *testing.T) {
 		t.Error("GetFileBytes stub should return nil")
 	}
 
-	// Fetch family.
-	if s, err := wasm.Fetch("http://x", wasm.FetchConfig{Method: "GET"}); s != "" || err != nil {
-		t.Errorf("Fetch stub: got (%q,%v)", s, err)
+	// Fetch stub returns a zero Response and no error.
+	if resp, err := wasm.Fetch("http://x", wasm.FetchConfig{Method: "GET"}); err != nil ||
+		resp.Status != 0 || resp.Body != nil || resp.Headers != nil {
+		t.Errorf("Fetch stub: got (%+v,%v)", resp, err)
 	}
-	if b, err := wasm.FetchBytes("http://x"); b != nil || err != nil {
-		t.Errorf("FetchBytes stub: got (%v,%v)", b, err)
+
+	// FetchAsync stub is inert: it must not panic and must not invoke done
+	// (the server-side no-op does nothing — the real async path lives in WASM).
+	wasm.FetchAsync("http://x", wasm.FetchConfig{}, func(_ wasm.Response, _ error) {
+		t.Error("FetchAsync stub should not invoke done")
+	})
+
+	// FetchChan stub yields exactly one zero FetchResult so a receive never
+	// blocks the host toolchain.
+	if r := <-wasm.FetchChan("http://x"); r.Err != nil ||
+		r.Response.Status != 0 || r.Response.Body != nil || r.Response.Headers != nil {
+		t.Errorf("FetchChan stub: got %+v", r)
 	}
 
 	// JSValue surface — assert documented zero values.
@@ -68,6 +79,54 @@ func TestServerStubs_NoOpsDoNotPanic(t *testing.T) {
 	}
 	if wasm.CookieGet("k") != "" {
 		t.Error("CookieGet stub should be empty")
+	}
+}
+
+// TestResponseMethods pins the Text/Bytes/OK helpers on a literal Response so
+// the value-type contract holds on the host toolchain (the WASM runtime shares
+// the same method bodies).
+func TestResponseMethods(t *testing.T) {
+	body := []byte("hello")
+	ok := wasm.Response{Status: 200, Body: body}
+	if !ok.OK() {
+		t.Error("Response{200}.OK() should be true")
+	}
+	if ok.Text() != "hello" {
+		t.Errorf("Response.Text(): got %q, want %q", ok.Text(), "hello")
+	}
+	if got := ok.Bytes(); string(got) != "hello" {
+		t.Errorf("Response.Bytes(): got %q, want %q", got, "hello")
+	}
+
+	// Boundary + non-2xx statuses.
+	for _, tc := range []struct {
+		status int
+		want   bool
+	}{{199, false}, {200, true}, {204, true}, {299, true}, {300, false}, {404, false}, {500, false}} {
+		if got := (wasm.Response{Status: tc.status}).OK(); got != tc.want {
+			t.Errorf("Response{%d}.OK(): got %v, want %v", tc.status, got, tc.want)
+		}
+	}
+
+	// Zero-value Response: empty body, not OK.
+	var zero wasm.Response
+	if zero.OK() || zero.Text() != "" || zero.Bytes() != nil {
+		t.Errorf("zero Response: got OK=%v Text=%q Bytes=%v", zero.OK(), zero.Text(), zero.Bytes())
+	}
+}
+
+// TestFetchResultFields pins the FetchResult value type: it carries a Response
+// and an Err, and its zero value is an empty Response with a nil Err. The WASM
+// runtime shares the same struct shape.
+func TestFetchResultFields(t *testing.T) {
+	r := wasm.FetchResult{Response: wasm.Response{Status: 200, Body: []byte("ok")}}
+	if !r.Response.OK() || r.Response.Text() != "ok" || r.Err != nil {
+		t.Errorf("FetchResult(ok): got %+v", r)
+	}
+
+	var zero wasm.FetchResult
+	if zero.Err != nil || zero.Response.Status != 0 || zero.Response.Body != nil {
+		t.Errorf("zero FetchResult: got %+v", zero)
 	}
 }
 

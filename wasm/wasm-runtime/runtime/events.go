@@ -352,16 +352,44 @@ func addScopedDocListener(eventType string, fn js.Func) {
 // OnUnmount registers a cleanup callback invoked by the bootstrap's per-scope
 // teardown when this component's [data-gothic-scope] element is removed from the
 // DOM. Use it to release things created outside the component's own subtree
-// (persistent document listeners attached directly, timers, topic mounts). The
-// callback is stored at __gothic_registry[<scope>].__onUnmount and retained in
-// keep so TinyGo's GC won't reclaim it before teardown fires.
-func OnUnmount(fn func()) {
+// (persistent document listeners attached directly, timers, topic mounts,
+// in-flight fetch AbortControllers). Callbacks are appended to the per-scope
+// __gothic_registry[<scope>].__onUnmounts array — multiple registrations in the
+// same scope all coexist and all run on teardown, in registration order (each in
+// its own try/catch, so one failure can't skip the rest).
+//
+// It returns a deregister func for callbacks that become dead weight before
+// teardown (e.g. a fetch abort once the request settles). Calling it NULLs this
+// entry's array slot (teardown's `if(F)` guard skips a nulled slot) and Releases
+// the wrapping js.Func, freeing its _values slot so a repeatedly-fetching
+// instance does not accumulate one live js.Func + AbortController per request.
+// It is idempotent and safe to ignore — a caller that never deregisters keeps
+// the old behavior (callback runs once on teardown). Entries are only ever
+// nulled, never spliced, so captured indices stay valid.
+func OnUnmount(fn func()) func() {
 	f := js.FuncOf(func(this js.Value, args []js.Value) interface{} {
 		fn()
 		return nil
 	})
 	keep = append(keep, f)
-	moduleRegistry().Set("__onUnmount", f)
+	reg := moduleRegistry()
+	unmounts := reg.Get("__onUnmounts")
+	if unmounts.IsUndefined() || unmounts.IsNull() {
+		unmounts = js.Global().Get("Array").New()
+		reg.Set("__onUnmounts", unmounts)
+	}
+	idx := unmounts.Length()
+	unmounts.Call("push", f)
+
+	deregistered := false
+	return func() {
+		if deregistered {
+			return
+		}
+		deregistered = true
+		unmounts.SetIndex(idx, js.Null())
+		f.Release()
+	}
 }
 
 // CreateWasmFunc registers a no-arg user callback under name. The Go closure

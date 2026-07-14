@@ -132,14 +132,20 @@ func TestDomStubsRemaining(t *testing.T) {
 	if got := GetFileBytes("x"); got != nil {
 		t.Errorf("GetFileBytes: got %v, want nil", got)
 	}
-	// Fetch/FetchBytes return zero values
-	s, err := Fetch("http://example.com")
-	if s != "" || err != nil {
-		t.Errorf("Fetch stub: got (%q, %v)", s, err)
+	// Fetch stub returns a zero Response and no error.
+	resp, err := Fetch("http://example.com")
+	if resp.Status != 0 || resp.Body != nil || resp.Headers != nil || err != nil {
+		t.Errorf("Fetch stub: got (%+v, %v)", resp, err)
 	}
-	b, err := FetchBytes("http://example.com")
-	if b != nil || err != nil {
-		t.Errorf("FetchBytes stub: got (%v, %v)", b, err)
+	// Response value-type helpers on the host stub.
+	if (Response{Status: 201, Body: []byte("x")}).OK() != true {
+		t.Error("Response{201}.OK() should be true")
+	}
+	if got := (Response{Body: []byte("abc")}).Text(); got != "abc" {
+		t.Errorf("Response.Text(): got %q, want %q", got, "abc")
+	}
+	if got := (Response{Body: []byte("abc")}).Bytes(); string(got) != "abc" {
+		t.Errorf("Response.Bytes(): got %q, want %q", got, "abc")
 	}
 	// JSValue zero-value contract.
 	jv := JS()

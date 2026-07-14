@@ -54,7 +54,7 @@ func bootstrapScope() string { return bootstrapScopeID }
 // parked goroutine that still holds a scope leaks it onto whatever goroutine
 // runs while it is parked, and cannot trust the global on resume (another
 // goroutine may have set its own scope and parked in turn). Blocking runtime
-// helpers (Fetch/FetchBytes/GetFileBytes) bracket their receive with parkScope
+// helpers (Fetch/GetFileBytes) bracket their receive with parkScope
 // so the carrier is never held across a suspension. Keep blocking calls OUTSIDE
 // runInScope/RunInScope, mirroring PingUntilOnline's time.Sleep.
 func runInScope(id string, fn func()) {

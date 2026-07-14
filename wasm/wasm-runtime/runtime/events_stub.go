@@ -11,9 +11,11 @@ func CreateWasmFuncWithReturn(name string, fn func(this JSValue, args []JSValue)
 }
 
 // OnUnmount is a no-op on the host build; the real implementation (js && wasm)
-// stores the callback at __gothic_registry[<scope>].__onUnmount for the
-// bootstrap's per-scope teardown to invoke.
-func OnUnmount(fn func()) {}
+// appends the callback to the __gothic_registry[<scope>].__onUnmounts array so
+// the bootstrap's per-scope teardown can invoke every registered callback. It
+// returns a deregister func (a no-op here) so host builds match the WASM
+// signature that drops a callback once it becomes dead weight.
+func OnUnmount(fn func()) func() { return func() {} }
 
 // GothicRegisterScope is a no-op on the host build; the real implementation
 // (js && wasm) registers the mount scope and publishes a per-instance

@@ -284,12 +284,76 @@ type FetchConfig struct {
 	Query     map[string]string
 }
 
-// Fetch makes an HTTP request using the browser's fetch API and blocks until complete.
-func Fetch(url string, config ...FetchConfig) (string, error) {
-	var cfg FetchConfig
-	if len(config) > 0 {
-		cfg = config[0]
+// Response is the result of a Fetch call. Body always holds the raw response
+// bytes (read via arrayBuffer, so binary payloads are not UTF-8-corrupted);
+// use Text()/Bytes()/OK() to consume it.
+type Response struct {
+	Status  int
+	Headers map[string]string
+	Body    []byte
+}
+
+// Text returns the response body decoded as a UTF-8 string.
+func (r Response) Text() string { return string(r.Body) }
+
+// Bytes returns the raw response body bytes.
+func (r Response) Bytes() []byte { return r.Body }
+
+// OK reports whether the response status is in the 2xx (200..299) range.
+func (r Response) OK() bool { return r.Status >= 200 && r.Status < 300 }
+
+// MapAny parses the response body as a JSON OBJECT and returns it as a
+// map[string]any. It uses the runtime's reflection-free parser (jsonparse.go, no
+// encoding/json / reflect — TinyGo-safe) so it never panics on malformed input:
+// invalid JSON yields a non-nil error. Values are coerced per D5 — nested objects
+// become map[string]any, arrays []any, strings string, numbers float64 (int64
+// magnitudes above 2^53 lose precision), booleans bool and null nil.
+//
+// The top-level JSON value MUST be an object; a body whose root is an array,
+// string, number, bool or null returns an error (use parseJSON-shaped helpers for
+// those). Typical use:
+//
+//	resp, err := Fetch("/api/user/1")
+//	if err == nil && resp.OK() {
+//	    m, err := resp.MapAny()
+//	    if err == nil { name, _ := m["name"].(string) }
+//	}
+func (r Response) MapAny() (map[string]any, error) {
+	v, err := parseJSON(r.Body)
+	if err != nil {
+		return nil, err
 	}
+	m, ok := v.(map[string]any)
+	if !ok {
+		return nil, errors.New("gothic json: response body is not a JSON object")
+	}
+	return m, nil
+}
+
+// FetchResult pairs a Response with its error for delivery over a channel. It is
+// what FetchChan sends: exactly one FetchResult per request, so a caller can
+// `r := <-FetchChan(url)` and read r.Response / r.Err.
+type FetchResult struct {
+	Response Response
+	Err      error
+}
+
+// errAborted is the sentinel returned by the blocking Fetch when the instance
+// halt channel (GothicHaltChan) fires before the request completes — the
+// per-scope AbortController is fired and the in-flight request is cancelled.
+var errAborted = errors.New("gothic: fetch aborted")
+
+// prepareFetch resolves the request URL (appending query params) and builds the
+// JS `init` object (method/headers/body). It also creates a per-scope
+// AbortController, wires its signal into `init`, and registers an OnUnmount hook
+// so the request is aborted when the calling component's [data-gothic-scope] is
+// torn down (D4 cancellation). It MUST be called synchronously while the scope
+// is still active (before any parkScope / channel suspension). The returned
+// AbortController lets the blocking Fetch additionally abort on instance halt;
+// the returned deregister func drops the abort hook once the request settles so
+// a repeatedly-fetching instance does not accumulate a js.Func + AbortController
+// per request (called exactly once from wireFetch's settle path).
+func prepareFetch(url string, cfg FetchConfig) (string, js.Value, js.Value, func()) {
 	if cfg.Method == "" {
 		cfg.Method = "GET"
 	}
@@ -327,102 +391,67 @@ func Fetch(url string, config ...FetchConfig) (string, error) {
 		init.Set("body", uint8Array)
 	}
 
-	type result struct {
-		body string
-		err  error
-	}
-	ch := make(chan result, 1)
+	// Per-scope cancellation (D4): attach an AbortSignal and fire it from the
+	// component's teardown so an in-flight request is cancelled on unmount.
+	ac := js.Global().Get("AbortController").New()
+	init.Set("signal", ac.Get("signal"))
+	deregister := OnUnmount(func() { ac.Call("abort") })
 
-	var thenFn, catchFn js.Func
-	thenFn = js.FuncOf(func(this js.Value, args []js.Value) interface{} {
-		thenFn.Release()
-		catchFn.Release()
-		resp := args[0]
-		var textThen, textCatch js.Func
-		textThen = js.FuncOf(func(_ js.Value, a []js.Value) interface{} {
-			textThen.Release()
-			textCatch.Release()
-			ch <- result{body: a[0].String()}
-			return nil
-		})
-		textCatch = js.FuncOf(func(_ js.Value, a []js.Value) interface{} {
-			textThen.Release()
-			textCatch.Release()
-			ch <- result{err: errors.New(a[0].String())}
-			return nil
-		})
-		resp.Call("text").Call("then", textThen).Call("catch", textCatch)
-		return nil
-	})
-	catchFn = js.FuncOf(func(this js.Value, args []js.Value) interface{} {
-		thenFn.Release()
-		catchFn.Release()
-		ch <- result{err: errors.New(args[0].String())}
-		return nil
-	})
-
-	js.Global().Call("fetch", url, init).Call("then", thenFn).Call("catch", catchFn)
-
-	restore := parkScope()
-	r := <-ch
-	restore()
-	return r.body, r.err
+	return url, init, ac, deregister
 }
 
-// FetchBytes makes an HTTP request and returns the response as raw bytes.
-// Use for binary responses (images, PDFs, ZIPs) where Fetch's text() decoding would corrupt data.
-func FetchBytes(url string, config ...FetchConfig) ([]byte, error) {
-	var cfg FetchConfig
-	if len(config) > 0 {
-		cfg = config[0]
+// wireFetch attaches then/catch (plus the nested arrayBuffer then/catch) to a
+// fetch promise and delivers the assembled Response — or an error — exactly once
+// via `deliver`. The body is read via arrayBuffer (never text()) so binary
+// payloads are preserved byte-for-byte; use Response.Text() for a UTF-8 view.
+//
+// js.Func lifecycle: thenFn/catchFn (and bufThen/bufCatch) are RETAINED until
+// they fire — they are NOT appended to `keep` (that would leak, they are
+// one-shot) and NOT released before their callback runs. Each pair releases
+// both of itself on entry, so no js.Func outlives the single delivery. `deliver`
+// must not block (all call sites send on a cap-1 channel or run a user callback).
+//
+// `deregister` drops the per-scope abort hook created by prepareFetch. It runs
+// via `settle` — which wraps every terminal path (bufThen success, bufCatch,
+// outer catchFn) — so it fires EXACTLY ONCE the moment the request completes,
+// BEFORE the result is delivered. This bounds the leak: once a request settles
+// its AbortController + abort js.Func are reclaimed, so a polling/concurrent
+// instance holds at most one per IN-FLIGHT request, not one per request ever.
+func wireFetch(promise js.Value, deregister func(), deliver func(Response, error)) {
+	// settle drops the (now-dead) abort registration, then delivers. deregister
+	// is idempotent; deliver is invoked once per request across all paths.
+	settle := func(resp Response, err error) {
+		deregister()
+		deliver(resp, err)
 	}
-	if cfg.Method == "" {
-		cfg.Method = "GET"
-	}
-
-	// Build URL with query parameters (identical to Fetch)
-	if len(cfg.Query) > 0 {
-		sep := "?"
-		if strings.Contains(url, "?") {
-			sep = "&"
-		}
-		for k, v := range cfg.Query {
-			url += sep + js.Global().Get("encodeURIComponent").Invoke(k).String() +
-				"=" + js.Global().Get("encodeURIComponent").Invoke(v).String()
-			sep = "&"
-		}
-	}
-
-	// Build fetch init object (identical to Fetch)
-	init := js.Global().Get("Object").New()
-	init.Set("method", cfg.Method)
-	if len(cfg.Headers) > 0 {
-		headers := js.Global().Get("Object").New()
-		for k, v := range cfg.Headers {
-			headers.Set(k, v)
-		}
-		init.Set("headers", headers)
-	}
-	if cfg.Body != "" {
-		init.Set("body", cfg.Body)
-	} else if len(cfg.BodyBytes) > 0 {
-		uint8Array := js.Global().Get("Uint8Array").New(len(cfg.BodyBytes))
-		js.CopyBytesToJS(uint8Array, cfg.BodyBytes)
-		init.Set("body", uint8Array)
-	}
-
-	type result struct {
-		data []byte
-		err  error
-	}
-	ch := make(chan result, 1)
 
 	var thenFn, catchFn js.Func
 	thenFn = js.FuncOf(func(this js.Value, args []js.Value) interface{} {
 		thenFn.Release()
 		catchFn.Release()
 		resp := args[0]
-		// Use arrayBuffer() instead of text() to avoid UTF-8 corruption
+
+		// Capture status and headers synchronously off the Response object
+		// while it is in hand — these are discarded once we await the body.
+		status := resp.Get("status").Int()
+		headers := map[string]string{}
+		hdrs := resp.Get("headers")
+		if !hdrs.IsUndefined() && !hdrs.IsNull() {
+			// Headers.forEach invokes its callback as (value, key, object),
+			// synchronously — safe to Release the one-shot Func right after.
+			var forEachCb js.Func
+			forEachCb = js.FuncOf(func(_ js.Value, a []js.Value) interface{} {
+				if len(a) >= 2 {
+					headers[a[1].String()] = a[0].String()
+				}
+				return nil
+			})
+			hdrs.Call("forEach", forEachCb)
+			forEachCb.Release()
+		}
+
+		// Read the body via arrayBuffer() (never text()) so binary payloads are
+		// not UTF-8-corrupted; Response.Text() decodes to a string on demand.
 		var bufThen, bufCatch js.Func
 		bufThen = js.FuncOf(func(_ js.Value, a []js.Value) interface{} {
 			bufThen.Release()
@@ -430,13 +459,13 @@ func FetchBytes(url string, config ...FetchConfig) ([]byte, error) {
 			uint8Array := js.Global().Get("Uint8Array").New(a[0])
 			data := make([]byte, uint8Array.Get("length").Int())
 			js.CopyBytesToGo(data, uint8Array)
-			ch <- result{data: data}
+			settle(Response{Status: status, Headers: headers, Body: data}, nil)
 			return nil
 		})
 		bufCatch = js.FuncOf(func(_ js.Value, a []js.Value) interface{} {
 			bufThen.Release()
 			bufCatch.Release()
-			ch <- result{err: errors.New(a[0].String())}
+			settle(Response{}, errors.New(a[0].String()))
 			return nil
 		})
 		resp.Call("arrayBuffer").Call("then", bufThen).Call("catch", bufCatch)
@@ -445,16 +474,74 @@ func FetchBytes(url string, config ...FetchConfig) ([]byte, error) {
 	catchFn = js.FuncOf(func(this js.Value, args []js.Value) interface{} {
 		thenFn.Release()
 		catchFn.Release()
-		ch <- result{err: errors.New(args[0].String())}
+		settle(Response{}, errors.New(args[0].String()))
 		return nil
 	})
 
-	js.Global().Call("fetch", url, init).Call("then", thenFn).Call("catch", catchFn)
+	promise.Call("then", thenFn).Call("catch", catchFn)
+}
+
+// Fetch makes an HTTP request using the browser's fetch API and blocks until
+// complete. The body is read via arrayBuffer (never text()) so binary responses
+// are preserved byte-for-byte; use Response.Text() for a UTF-8 string view.
+//
+// Cancellation (D4): the request carries a per-scope AbortController fired on
+// component teardown (OnUnmount). As a backstop, the blocking receive also
+// selects on GothicHaltChan — if the whole instance is halted before the
+// response arrives, the request is aborted and errAborted is returned.
+func Fetch(url string, config ...FetchConfig) (Response, error) {
+	var cfg FetchConfig
+	if len(config) > 0 {
+		cfg = config[0]
+	}
+
+	url, init, ac, dereg := prepareFetch(url, cfg)
+
+	ch := make(chan FetchResult, 1)
+	wireFetch(js.Global().Call("fetch", url, init), dereg, func(resp Response, err error) {
+		ch <- FetchResult{Response: resp, Err: err}
+	})
 
 	restore := parkScope()
-	r := <-ch
-	restore()
-	return r.data, r.err
+	defer restore()
+	select {
+	case r := <-ch:
+		return r.Response, r.Err
+	case <-GothicHaltChan():
+		ac.Call("abort")
+		return Response{}, errAborted
+	}
+}
+
+// FetchAsync makes an HTTP request and invokes done(Response, error) when it
+// completes — it does NOT block and starts no goroutine (the browser drives the
+// promise). done runs inside the scope active at the call site (captured here
+// and re-established via runInScope) so DOM writes hit the right subtree. The
+// request is aborted on component teardown via a per-scope AbortController.
+func FetchAsync(url string, cfg FetchConfig, done func(Response, error)) {
+	sc := CaptureScope()
+	url, init, _, dereg := prepareFetch(url, cfg)
+	wireFetch(js.Global().Call("fetch", url, init), dereg, func(resp Response, err error) {
+		runInScope(sc, func() { done(resp, err) })
+	})
+}
+
+// FetchChan makes an HTTP request and returns a receive-only channel that yields
+// exactly one FetchResult when the request completes. It does NOT block — the
+// caller selects on the returned channel. The channel is buffered (cap 1) so the
+// promise callback never blocks even if the caller stops receiving. The request
+// is aborted on component teardown via a per-scope AbortController.
+func FetchChan(url string, cfg ...FetchConfig) <-chan FetchResult {
+	var c FetchConfig
+	if len(cfg) > 0 {
+		c = cfg[0]
+	}
+	url, init, _, dereg := prepareFetch(url, c)
+	ch := make(chan FetchResult, 1)
+	wireFetch(js.Global().Call("fetch", url, init), dereg, func(resp Response, err error) {
+		ch <- FetchResult{Response: resp, Err: err}
+	})
+	return ch
 }
 
 // JSValue wraps js.Value. Never create as a literal; use JS(), Document(), etc.

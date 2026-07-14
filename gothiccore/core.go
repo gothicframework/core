@@ -186,7 +186,7 @@ const JS = `// gothic-core.js — shared idempotent Gothic WASM runtime (Phase 1
             window.__gothicTearingDown[id]=1;
             var reg=window.__gothic_registry&&window.__gothic_registry[id];
             if(reg){
-                if(reg.__onUnmount){try{reg.__onUnmount();}catch(e){}}
+                if(reg.__onUnmounts){for(var u=0;u<reg.__onUnmounts.length;u++){var F=reg.__onUnmounts[u];if(F){try{F();}catch(e){}}}}
                 if(reg.__listeners){
                     for(var i=0;i<reg.__listeners.length;i++){
                         var L=reg.__listeners[i];

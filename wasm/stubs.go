@@ -59,8 +59,10 @@ func (e *Subscription) Stop() {}
 // OnUnmount registers a cleanup callback run when the component's
 // [data-gothic-scope] element is removed from the DOM (server-side no-op). In
 // the WASM runtime it releases things created outside the component's subtree
-// (document listeners, timers, topic mounts).
-func OnUnmount(fn func()) {}
+// (document listeners, timers, topic mounts, in-flight fetch AbortControllers).
+// It returns a deregister func (a no-op here) that drops the callback early once
+// it becomes dead weight — callers may ignore it.
+func OnUnmount(fn func()) func() { return func() {} }
 
 // CaptureScope returns the scope active at the call site (server-side no-op:
 // always ""). In the WASM runtime it captures the active [data-gothic-scope] so
@@ -121,26 +123,148 @@ type FetchConfig struct {
 	Query     map[string]string // query parameters appended to the URL
 }
 
+// Response is the result of a Fetch call (server-side no-op mirror of the WASM
+// runtime type). Body holds the raw response bytes; use Text()/Bytes()/OK().
+type Response struct {
+	Status  int               // HTTP status code
+	Headers map[string]string // response headers
+	Body    []byte            // raw response body bytes
+}
+
+// Text returns the response body decoded as a UTF-8 string.
+func (r Response) Text() string { return string(r.Body) }
+
+// Bytes returns the raw response body bytes.
+func (r Response) Bytes() []byte { return r.Body }
+
+// OK reports whether the response status is in the 2xx (200..299) range.
+func (r Response) OK() bool { return r.Status >= 200 && r.Status < 300 }
+
+// MapAny parses the response body as a JSON object into a map[string]any
+// (server-side no-op mirror: always nil, nil). In the WASM runtime it uses a
+// reflection-free, TinyGo-safe parser that never panics on malformed input —
+// invalid JSON returns a non-nil error. The top-level value must be a JSON
+// object; nested values are coerced to map[string]any / []any / string / float64
+// (int64 > 2^53 loses precision) / bool / nil.
+//
+// Example:
+//
+//	resp, err := Fetch("/api/user/1")
+//	if err == nil && resp.OK() {
+//	    m, err := resp.MapAny()
+//	    if err == nil { name, _ := m["name"].(string) }
+//	}
+func (r Response) MapAny() (map[string]any, error) { return nil, nil }
+
 // Fetch makes an HTTP request using the browser's fetch API and blocks until complete.
-// Config is optional — omit for a simple GET request.
+// Config is optional — omit for a simple GET request. The body is read as raw bytes;
+// use Response.Text() for a string view, Response.Bytes() for binary, Response.OK()
+// for a 2xx check.
 // Must be called from inside a goroutine or CreateWasmFunc handler.
 //
 // Example:
 //
-//	body, err := Fetch("https://api.example.com/todos/1")
+//	resp, err := Fetch("https://api.example.com/todos/1")
+//	if err == nil && resp.OK() {
+//	    body := resp.Text()
+//	}
 //
-//	body, err := Fetch("https://api.example.com/todos", FetchConfig{
+//	resp, err := Fetch("https://api.example.com/todos", FetchConfig{
 //	    Method:  "POST",
 //	    Headers: map[string]string{"Content-Type": "application/json"},
 //	    Body:    `{"title":"foo"}`,
 //	})
-func Fetch(url string, config ...FetchConfig) (string, error) { return "", nil }
+func Fetch(url string, config ...FetchConfig) (Response, error) { return Response{}, nil }
 
-// FetchBytes makes an HTTP request and returns the response as raw bytes.
-// Use this instead of Fetch when the response is binary (images, PDFs, ZIPs, etc.).
-// Config is optional — omit for a simple GET.
-// Must be called from inside a goroutine or CreateWasmFunc handler.
-func FetchBytes(url string, config ...FetchConfig) ([]byte, error) { return nil, nil }
+// Decode parses r's JSON body into a value of struct type T and returns it
+// (server-side no-op: returns the zero value and nil). At WASM build time the
+// gothic CLI REPLACES each Decode[T](resp) call with a generated, reflection-free
+// _jsonDecode_T(resp): the CLI reads T's fields (and json tags) via go/types and
+// emits code that reads them out of the runtime's reflection-free JSON parse —
+// so NEITHER reflect NOR encoding/json is pulled into the TinyGo binary. This
+// server-side stub exists only so a ClientSideState block calling Decode[T]
+// type-checks during SSR / ScanPages.
+//
+// T must be a struct type. Fields are matched by json tag (falling back to the
+// Go field name); JSON numbers coerce to numeric fields (int64 magnitudes above
+// 2^53 lose precision), and a missing key or JSON null yields the field's zero
+// value. Nested structs, slices, pointers, and string-keyed maps are supported;
+// unsupported field types decode as their zero value.
+//
+// Example:
+//
+//	resp, err := Fetch("/api/user/1")
+//	if err == nil && resp.OK() {
+//	    user, err := Decode[User](resp)
+//	    if err == nil { SetText("name", user.Name) }
+//	}
+func Decode[T any](r Response) (T, error) {
+	var zero T
+	return zero, nil
+}
+
+// Encode marshals a value of struct type T to a JSON []byte, for use as a request
+// body (server-side no-op: returns nil). It is the write-direction mirror of
+// Decode. At WASM build time the gothic CLI REPLACES each Encode[T](v) call with
+// a generated, reflection-free _jsonEncode_T(v): the CLI reads T's fields (and
+// json tags) via go/types and emits code that appends their JSON by hand — so
+// NEITHER reflect NOR encoding/json is pulled into the TinyGo binary. This
+// server-side stub exists only so a ClientSideState block calling Encode[T]
+// type-checks during SSR / ScanPages.
+//
+// T must be a struct type, and the call MUST carry an explicit type argument
+// (Encode[T](v)) — the build-time rewrite is syntactic and cannot recover an
+// inferred T. Fields are emitted in struct order, keyed by json tag (falling back
+// to the field name); `json:"-"` is skipped; `,omitempty` is ignored (the field
+// is always written); nil slices/pointers/maps become JSON null.
+//
+// Example:
+//
+//	body := Encode[CreateUser](CreateUser{Name: name})
+//	Fetch("/api/users", FetchConfig{Method: "POST", BodyBytes: body})
+func Encode[T any](v T) []byte {
+	return nil
+}
+
+// FetchResult pairs a Response with its error for delivery over a channel
+// (server-side no-op mirror of the WASM runtime type). It is what FetchChan
+// sends: exactly one FetchResult per request.
+type FetchResult struct {
+	Response Response
+	Err      error
+}
+
+// FetchAsync makes an HTTP request and invokes done(Response, error) when it
+// completes, without blocking (server-side no-op). done runs inside the scope
+// active at the call site so DOM writes hit the right subtree, and the request
+// is aborted on component teardown. Use it when a blocking Fetch would stall a
+// handler.
+//
+// Example:
+//
+//	FetchAsync("/api/todos", FetchConfig{}, func(resp Response, err error) {
+//	    if err == nil && resp.OK() {
+//	        SetText("out", resp.Text())
+//	    }
+//	})
+func FetchAsync(url string, cfg FetchConfig, done func(Response, error)) {}
+
+// FetchChan makes an HTTP request and returns a receive-only channel that yields
+// exactly one FetchResult when it completes (server-side no-op mirror). It does
+// not block — select on the returned channel. Use it to await one of several
+// requests or to combine a fetch with a timeout in a select.
+//
+// Example:
+//
+//	select {
+//	case r := <-FetchChan("/api/todos"):
+//	    if r.Err == nil && r.Response.OK() { SetText("out", r.Response.Text()) }
+//	}
+func FetchChan(url string, cfg ...FetchConfig) <-chan FetchResult {
+	ch := make(chan FetchResult, 1)
+	ch <- FetchResult{}
+	return ch
+}
 
 // JSValue is a server-side stub for syscall/js.Value.
 // All methods are no-ops; the real implementation lives in the WASM runtime.
@@ -533,3 +657,160 @@ type CookieOptions struct {
 func CookieSet(key, value string, opts ...CookieOptions) {}
 func CookieGet(key string) string                        { return "" }
 func CookieDelete(key string)                            {}
+
+// ── HTMX: ergonomic mirror of the vendored htmx 2.0.3 JS API ─────────────────
+//
+// Server-side no-ops. At WASM compile time the framework substitutes the real
+// TinyGo implementation (runtime/htmx.go) that drives window.htmx. Users call
+// these unqualified via the dot import, e.g. HTMX.Swap("#out", html).
+
+// HTMX is the htmx API singleton (server-side no-op).
+var HTMX htmxAPI
+
+// htmxAPI is the unexported receiver type behind the HTMX singleton.
+type htmxAPI struct{}
+
+// Event is the browser Event passed to On/OnGlobal handlers (server-side: JSValue
+// stub). In the WASM runtime it exposes the DOM Event — call e.Get("detail"),
+// e.Get("target"), e.Call("preventDefault"), etc.
+type Event = JSValue
+
+// SwapStrategy is a string-backed htmx swap style (the hx-swap vocabulary). The
+// eight canonical values give autocomplete; a custom style is reachable via a
+// string cast, e.g. SwapStrategy("innerHTML show:top").
+type SwapStrategy string
+
+const (
+	InnerHTML   SwapStrategy = "innerHTML"   // replace the target's inner HTML (default)
+	OuterHTML   SwapStrategy = "outerHTML"   // replace the entire target element
+	BeforeBegin SwapStrategy = "beforebegin" // insert before the target element
+	AfterBegin  SwapStrategy = "afterbegin"  // insert as the target's first child
+	BeforeEnd   SwapStrategy = "beforeend"   // insert as the target's last child
+	AfterEnd    SwapStrategy = "afterend"    // insert after the target element
+	Delete      SwapStrategy = "delete"      // delete the target regardless of response
+	None        SwapStrategy = "none"        // do not append the response content
+)
+
+// HtmxEvent is a string-backed htmx event name. The consts are the full htmx
+// 2.0.3 event catalog; a custom/extension event is reachable via a string cast,
+// e.g. HtmxEvent("htmx:sse:message").
+type HtmxEvent string
+
+const (
+	EvtAbort                     HtmxEvent = "htmx:abort"
+	EvtAfterOnLoad               HtmxEvent = "htmx:afterOnLoad"
+	EvtAfterProcessNode          HtmxEvent = "htmx:afterProcessNode"
+	EvtAfterRequest              HtmxEvent = "htmx:afterRequest"
+	EvtAfterSettle               HtmxEvent = "htmx:afterSettle"
+	EvtAfterSwap                 HtmxEvent = "htmx:afterSwap"
+	EvtBadResponseURL            HtmxEvent = "htmx:badResponseUrl"
+	EvtBeforeCleanupElement      HtmxEvent = "htmx:beforeCleanupElement"
+	EvtBeforeHistorySave         HtmxEvent = "htmx:beforeHistorySave"
+	EvtBeforeHistoryUpdate       HtmxEvent = "htmx:beforeHistoryUpdate"
+	EvtBeforeOnLoad              HtmxEvent = "htmx:beforeOnLoad"
+	EvtBeforeProcessNode         HtmxEvent = "htmx:beforeProcessNode"
+	EvtBeforeRequest             HtmxEvent = "htmx:beforeRequest"
+	EvtBeforeSend                HtmxEvent = "htmx:beforeSend"
+	EvtBeforeSwap                HtmxEvent = "htmx:beforeSwap"
+	EvtBeforeTransition          HtmxEvent = "htmx:beforeTransition"
+	EvtConfigRequest             HtmxEvent = "htmx:configRequest"
+	EvtConfirm                   HtmxEvent = "htmx:confirm"
+	EvtError                     HtmxEvent = "htmx:error"
+	EvtEvalDisallowedError       HtmxEvent = "htmx:evalDisallowedError"
+	EvtEventFilterError          HtmxEvent = "htmx:eventFilter:error"
+	EvtHistoryCacheError         HtmxEvent = "htmx:historyCacheError"
+	EvtHistoryCacheMiss          HtmxEvent = "htmx:historyCacheMiss"
+	EvtHistoryCacheMissLoad      HtmxEvent = "htmx:historyCacheMissLoad"
+	EvtHistoryCacheMissLoadError HtmxEvent = "htmx:historyCacheMissLoadError"
+	EvtHistoryItemCreated        HtmxEvent = "htmx:historyItemCreated"
+	EvtHistoryRestore            HtmxEvent = "htmx:historyRestore"
+	EvtInvalidPath               HtmxEvent = "htmx:invalidPath"
+	EvtLoad                      HtmxEvent = "htmx:load"
+	EvtOnLoadError               HtmxEvent = "htmx:onLoadError"
+	EvtOobAfterSwap              HtmxEvent = "htmx:oobAfterSwap"
+	EvtOobBeforeSwap             HtmxEvent = "htmx:oobBeforeSwap"
+	EvtOobErrorNoTarget          HtmxEvent = "htmx:oobErrorNoTarget"
+	EvtPrompt                    HtmxEvent = "htmx:prompt"
+	EvtPushedIntoHistory         HtmxEvent = "htmx:pushedIntoHistory"
+	EvtReplacedInHistory         HtmxEvent = "htmx:replacedInHistory"
+	EvtResponseError             HtmxEvent = "htmx:responseError"
+	EvtRestored                  HtmxEvent = "htmx:restored"
+	EvtSendAbort                 HtmxEvent = "htmx:sendAbort"
+	EvtSendError                 HtmxEvent = "htmx:sendError"
+	EvtSwapError                 HtmxEvent = "htmx:swapError"
+	EvtSyntaxError               HtmxEvent = "htmx:syntax:error"
+	EvtTargetError               HtmxEvent = "htmx:targetError"
+	EvtTimeout                   HtmxEvent = "htmx:timeout"
+	EvtTrigger                   HtmxEvent = "htmx:trigger"
+	EvtValidateURL               HtmxEvent = "htmx:validateUrl"
+	EvtValidationValidate        HtmxEvent = "htmx:validation:validate"
+	EvtValidationFailed          HtmxEvent = "htmx:validation:failed"
+	EvtValidationHalted          HtmxEvent = "htmx:validation:halted"
+	EvtXHRAbort                  HtmxEvent = "htmx:xhr:abort"
+	EvtXHRLoadstart              HtmxEvent = "htmx:xhr:loadstart"
+	EvtXHRLoadend                HtmxEvent = "htmx:xhr:loadend"
+	EvtXHRProgress               HtmxEvent = "htmx:xhr:progress"
+)
+
+// AjaxOpts is the optional context for HTMX.Ajax (maps onto htmx's ajax()
+// context object). Zero fields are omitted.
+type AjaxOpts struct {
+	Target string            // CSS selector for where to swap the response
+	Source string            // CSS selector for the request's source element
+	Swap   SwapStrategy      // swap style for the response
+	Values map[string]string // extra values sent with the request
+}
+
+// Ajax issues an htmx AJAX request (server-side no-op).
+func (htmxAPI) Ajax(method, url string, opts ...AjaxOpts) {}
+
+// Swap replaces content at the target selector with html and re-processes it so
+// nested Gothic stateful components boot (server-side no-op). SECURITY: in the
+// WASM runtime Swap runs <script> tags in html — only swap trusted HTML.
+func (htmxAPI) Swap(target, html string, s ...SwapStrategy) {}
+
+// Process wires hx-* attributes on a freshly inserted subtree (server-side no-op).
+func (htmxAPI) Process(target string) {}
+
+// Trigger dispatches htmx event e on the target element (server-side no-op).
+func (htmxAPI) Trigger(target string, e HtmxEvent, detail ...map[string]any) {}
+
+// On registers a subtree- and lifetime-scoped handler for htmx event e; it auto-
+// detaches on component teardown (server-side no-op).
+func (htmxAPI) On(e HtmxEvent, h func(Event)) {}
+
+// OnGlobal registers a page-wide, lifetime-scoped handler for htmx event e
+// (server-side no-op).
+func (htmxAPI) OnGlobal(e HtmxEvent, h func(Event)) {}
+
+// Off detaches On/OnGlobal listeners for event e in the active scope (server-side
+// no-op). The h argument is accepted for symmetry but ignored (Go funcs are not
+// comparable).
+func (htmxAPI) Off(e HtmxEvent, h func(Event)) {}
+
+// AddClass adds class to the target element (server-side no-op).
+func (htmxAPI) AddClass(target, class string) {}
+
+// RemoveClass removes class from the target element (server-side no-op).
+func (htmxAPI) RemoveClass(target, class string) {}
+
+// ToggleClass toggles class on the target element (server-side no-op).
+func (htmxAPI) ToggleClass(target, class string) {}
+
+// TakeClass adds class to the target and removes it from siblings (server-side no-op).
+func (htmxAPI) TakeClass(target, class string) {}
+
+// Find returns the first element matching sel (server-side no-op: zero JSValue).
+func (htmxAPI) Find(sel string) JSValue { return JSValue{} }
+
+// FindAll returns all elements matching sel (server-side no-op: nil).
+func (htmxAPI) FindAll(sel string) []JSValue { return nil }
+
+// Closest returns the nearest ancestor of target matching sel (server-side no-op).
+func (htmxAPI) Closest(target, sel string) JSValue { return JSValue{} }
+
+// Values returns the input values htmx would submit from target (server-side no-op).
+func (htmxAPI) Values(target string) map[string]any { return map[string]any{} }
+
+// Remove removes the target element from the DOM (server-side no-op).
+func (htmxAPI) Remove(target string) {}

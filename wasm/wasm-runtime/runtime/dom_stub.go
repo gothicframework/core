@@ -21,8 +21,39 @@ type FetchConfig struct {
 	Query     map[string]string
 }
 
-func Fetch(url string, config ...FetchConfig) (string, error) { return "", nil }
-func FetchBytes(url string, config ...FetchConfig) ([]byte, error) { return nil, nil }
+type Response struct {
+	Status  int
+	Headers map[string]string
+	Body    []byte
+}
+
+func (r Response) Text() string  { return string(r.Body) }
+func (r Response) Bytes() []byte { return r.Body }
+func (r Response) OK() bool      { return r.Status >= 200 && r.Status < 300 }
+
+// MapAny is a server-side no-op mirror of the WASM runtime method (Response has
+// no body server-side). Returns nil, nil — the real JSON parse happens only in
+// the browser build (dom.go). It is a METHOD, so parity_surface_test.go's
+// top-level-func check does not cover it; it must be mirrored here by hand.
+func (r Response) MapAny() (map[string]any, error) { return nil, nil }
+
+type FetchResult struct {
+	Response Response
+	Err      error
+}
+
+func Fetch(url string, config ...FetchConfig) (Response, error) { return Response{}, nil }
+
+func FetchAsync(url string, cfg FetchConfig, done func(Response, error)) {}
+
+// FetchChan returns a buffered channel already carrying one zero FetchResult so
+// a host consumer that receives from it gets a zero value instead of blocking
+// forever — matching the zero-value discipline of the other server-side stubs.
+func FetchChan(url string, cfg ...FetchConfig) <-chan FetchResult {
+	ch := make(chan FetchResult, 1)
+	ch <- FetchResult{}
+	return ch
+}
 
 type JSValue struct{}
 
