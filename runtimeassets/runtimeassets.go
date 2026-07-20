@@ -14,12 +14,14 @@
 //	wasm_exec.js                the TinyGo wasm_exec shim (wasmexec)
 //	htmx.min.js                 HTMX, self-hosted (vendorjs) — no longer a render-blocking CDN <script>
 //
-// Every asset is content-negotiated: the handler precompresses each one with
-// brotli and gzip at startup and serves the smallest form the client accepts
-// (Content-Encoding: br|gzip), falling back to the raw bytes. This is what makes
-// the ~1.9 MB gothic-core.wasm transfer at a fraction of its size on routes that
-// serve it through this handler (a CDN in front is free to keep doing its own
-// compression too).
+// Every asset is content-negotiated: each one's brotli and gzip variants are
+// precomputed at BUILD TIME (by `go generate`, see gen.go) and embedded, and the
+// handler serves the smallest form the client accepts (Content-Encoding: br|gzip),
+// falling back to the raw bytes. Compressing at build time (not at startup) is what
+// keeps the server's cold start fast — brotli q11 on the ~1.9 MB gothic-core.wasm
+// takes seconds of CPU, so doing it once at release time instead of on every
+// process start is the difference between an instant boot and a slow one. (A CDN in
+// front is free to keep doing its own compression too.)
 //
 // NOTE the user's own GOROOT-matched wasm_exec_go.js stays in public/ (it is
 // version-tied to the user's Go toolchain, copied at build time — not a framework
@@ -31,15 +33,13 @@
 package runtimeassets
 
 import (
-	"bytes"
-	"compress/gzip"
 	"crypto/sha256"
+	"embed"
 	"encoding/hex"
 	"net/http"
 	"strconv"
 	"strings"
 
-	"github.com/andybalholm/brotli"
 	"github.com/gothicframework/core/corewasm"
 	"github.com/gothicframework/core/gothiccore"
 	"github.com/gothicframework/core/vendorjs"
@@ -78,51 +78,36 @@ func hash16(b []byte) string {
 	return hex.EncodeToString(sum[:])[:16]
 }
 
-// gzipBytes returns b gzip-compressed at max level, or nil if compression did not
-// shrink it (tiny/already-compressed inputs) so the handler serves raw instead.
-func gzipBytes(b []byte) []byte {
-	var buf bytes.Buffer
-	zw, err := gzip.NewWriterLevel(&buf, gzip.BestCompression)
+// The brotli and gzip variants are computed ONCE at build time by `go generate`
+// (see gen.go) and embedded here, so the running server spends ZERO cold-start CPU
+// on compression — it just serves the ready bytes. Build-time compression can use
+// the maximum ratio (brotli q11) for free; doing it at startup instead cost several
+// seconds on a small-CPU Lambda (q11 on the ~1.9 MB core wasm) and could blow the
+// init timeout. A drift test fails if a committed variant no longer matches its
+// source, so a changed asset forces a regenerate.
+//
+//go:generate go run gen.go
+//go:embed all:assets
+var precompressed embed.FS
+
+// loadPrecompressed returns the build-time-compressed variant for an asset
+// (ext ".br" or ".gz"), or nil when none was committed — the variant did not
+// shrink that asset — so the handler serves the raw bytes.
+func loadPrecompressed(name, ext string) []byte {
+	b, err := precompressed.ReadFile("assets/" + name + ext)
 	if err != nil {
 		return nil
 	}
-	if _, err := zw.Write(b); err != nil {
-		return nil
-	}
-	if err := zw.Close(); err != nil {
-		return nil
-	}
-	if buf.Len() >= len(b) {
-		return nil
-	}
-	return buf.Bytes()
+	return b
 }
 
-// brotliBytes returns b brotli-compressed at max level, or nil if it did not
-// shrink. Brotli typically beats gzip on these text/wasm assets, so it is offered
-// first in negotiation.
-func brotliBytes(b []byte) []byte {
-	var buf bytes.Buffer
-	bw := brotli.NewWriterLevel(&buf, brotli.BestCompression)
-	if _, err := bw.Write(b); err != nil {
-		return nil
-	}
-	if err := bw.Close(); err != nil {
-		return nil
-	}
-	if buf.Len() >= len(b) {
-		return nil
-	}
-	return buf.Bytes()
-}
-
-// newAsset builds an Asset, precomputing its compressed variants once at startup.
+// newAsset builds an Asset, wiring in its build-time-precompressed variants.
 func newAsset(name string, b []byte, contentType, version string) Asset {
 	return Asset{
 		Name:        name,
 		Bytes:       b,
-		Brotli:      brotliBytes(b),
-		Gzip:        gzipBytes(b),
+		Brotli:      loadPrecompressed(name, ".br"),
+		Gzip:        loadPrecompressed(name, ".gz"),
 		ContentType: contentType,
 		Version:     version,
 	}
@@ -137,12 +122,12 @@ var wasmExecShimHash = hash16(wasmexec.Shim)
 // asset-owning leaf packages so there is a single source of truth per artifact.
 var registry = func() map[string]Asset {
 	list := []Asset{
-		newAsset(gothiccore.FileName, gothiccore.Minified(), contentTypeJS, gothiccore.Version()),       // gothic-core.js (minified)
-		newAsset(corewasm.WASMFileName, corewasm.CoreWASM(), contentTypeWASM, corewasm.CoreHash()),      // gothic-core.wasm
-		newAsset(corewasm.ExecFileName, corewasm.ExecJS(), contentTypeJS, corewasm.ExecHash()),          // gothic-core-exec.js
-		newAsset(corewasm.BootFileName, corewasm.BootJS(), contentTypeJS, corewasm.Version()),           // gothic-core-boot.js
-		newAsset("wasm_exec.js", wasmexec.Shim, contentTypeJS, wasmExecShimHash),                        // TinyGo shim
-		newAsset(vendorjs.HtmxFileName, vendorjs.HtmxJS(), contentTypeJS, vendorjs.HtmxVersion()), // htmx.min.js (self-hosted)
+		newAsset(gothiccore.FileName, gothiccore.Minified(), contentTypeJS, gothiccore.Version()),  // gothic-core.js (minified)
+		newAsset(corewasm.WASMFileName, corewasm.CoreWASM(), contentTypeWASM, corewasm.CoreHash()), // gothic-core.wasm
+		newAsset(corewasm.ExecFileName, corewasm.ExecJS(), contentTypeJS, corewasm.ExecHash()),     // gothic-core-exec.js
+		newAsset(corewasm.BootFileName, corewasm.BootJS(), contentTypeJS, corewasm.Version()),      // gothic-core-boot.js
+		newAsset("wasm_exec.js", wasmexec.Shim, contentTypeJS, wasmExecShimHash),                   // TinyGo shim
+		newAsset(vendorjs.HtmxFileName, vendorjs.HtmxJS(), contentTypeJS, vendorjs.HtmxVersion()),  // htmx.min.js (self-hosted)
 	}
 	m := make(map[string]Asset, len(list))
 	for _, a := range list {
