@@ -175,7 +175,7 @@ func TestDomStubsRemaining(t *testing.T) {
 	}
 }
 
-// --- durable state cache (Phase 18) host stubs ---
+// --- durable state cache host stubs ---
 
 // TestDurableStubsAreNoOps pins the host-build durable contract: DurableKey is
 // always empty (no DOM server-side) and DurableObserve does nothing, so a durable

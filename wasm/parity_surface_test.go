@@ -9,8 +9,8 @@ import (
 	"testing"
 )
 
-// TestUserFacingStubParity guards the exact gap that let OnUnmount slip through
-// Phase 12→13: a user-facing exported function that exists in the WASM runtime
+// TestUserFacingStubParity guards the exact gap that let OnUnmount slip through:
+// a user-facing exported function that exists in the WASM runtime
 // (pkg/wasm/wasm-runtime/runtime) but is MISSING from this package's server-side
 // stubs (stubs.go). Users dot-import this package so their ClientSideState block
 // compiles for SSR — every symbol a user may hand-write in that block MUST have
@@ -26,11 +26,11 @@ func TestUserFacingStubParity(t *testing.T) {
 	mustProvide := []string{
 		// reactive state & effects
 		"CreateObservable", "Observe", "ObserveWithCleanup", "NewObservableField",
-		// durable state cache (Phase 18)
+		// durable state cache
 		"DurableObserve", "DurableKey",
-		// lifecycle (Phase 12)
+		// lifecycle
 		"OnUnmount",
-		// scope carrier (Phase 13)
+		// scope carrier
 		"CaptureScope", "RunInScope",
 		// named DOM helpers
 		"SetText", "SetHTML", "SetValue", "GetValue", "GetFileBytes",
@@ -40,7 +40,7 @@ func TestUserFacingStubParity(t *testing.T) {
 		"CreateWasmFuncWithReturn", "AddEventListener", "AddEventListenerWithEvent",
 		// HTTP
 		"Fetch", "FetchAsync", "FetchChan",
-		// typed JSON decode/encode (Phase 6/7) — rewritten to generated
+		// typed JSON decode/encode — rewritten to generated
 		// _jsonDecode_T / _jsonEncode_T in WASM
 		"Decode", "Encode",
 		// storage / cookies

@@ -26,12 +26,12 @@ func GothicRegisterScope(body func()) {}
 
 // GothicRegisterSchema is a no-op on the host build. The real implementation
 // (js && wasm) deposits the type's compact schema descriptor on
-// window.__gothicSchemas under its content-hash id — the Phase 15 schema seam,
+// window.__gothicSchemas under its content-hash id — the schema seam,
 // reserved for a future generic interpreter and interpreted by nothing in v3.0.
 func GothicRegisterSchema(key, schemaID, descriptor string) {}
 
 // GothicRegisterWithCore is a no-op on the host build. The real implementation
-// (js && wasm) performs the component→core registration RPC against the Phase-16
+// (js && wasm) performs the component→core registration RPC against the
 // full-Go static core over the document control-plane bus. Like
 // GothicRegisterSchema it is emitted by generated code only, never hand-written
 // in a ClientSideState block, so it has no user-facing stub-parity obligation.

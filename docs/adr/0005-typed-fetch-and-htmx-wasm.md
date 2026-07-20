@@ -2,7 +2,7 @@
 
 - Status: Accepted
 - Date: 2026-07-13
-- Scope: Gothic v3.0.0 WASM client tooling — Typed Fetch + HTMX (Phase 8–11)
+- Scope: Gothic v3.0.0 WASM client tooling — Typed Fetch + HTMX
 - Related: [0001](0001-custom-codec-not-protobuf.md), [0002](0002-schema-seam-generic-interpreter-deferred.md), [0004](0004-static-full-go-core.md)
 
 ## Context
@@ -124,7 +124,7 @@ third-party HTML.
 - **Breaking: `Fetch` signature changed and `FetchBytes` was removed.** `Fetch`
   now returns `(Response, error)` instead of `(string, error)`; callers read
   `resp.Text()` for the old string and `resp.Bytes()` for the old
-  `FetchBytes` result. Any pre-Phase-8 code using `Fetch`'s string return or
+  `FetchBytes` result. Any older code using `Fetch`'s string return or
   `FetchBytes` must migrate.
 - **DTOs used with `Decode[T]`/`Encode[T]` must live in a `net/http`-free
   package.** A cross-package `T` forces the CLI to `import T's package` into the

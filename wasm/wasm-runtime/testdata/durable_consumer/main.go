@@ -1,7 +1,7 @@
 //go:build js && wasm
 
 // Command durable_consumer is a compile-only fixture proving a DURABLE consumer's
-// main() builds under GOOS=js GOARCH=wasm (Phase 18 acceptance). It mirrors the
+// main() builds under GOOS=js GOARCH=wasm. It mirrors the
 // shape of a generated ClientSideState body that opts a component into the core's
 // page-session durable cache: create observables, DurableObserve them (rehydrates
 // from the core across teardown→re-mount, persists changes), wire the DOM, expose

@@ -13,7 +13,6 @@
 //	gothic-core-boot.js         the generated core boot loader (corewasm)
 //	wasm_exec.js                the TinyGo wasm_exec shim (wasmexec)
 //	htmx.min.js                 HTMX, self-hosted (vendorjs) — no longer a render-blocking CDN <script>
-//	amz-content-sha256.min.js   the amz-content-sha256 HTMX extension (vendorjs)
 //
 // Every asset is content-negotiated: the handler precompresses each one with
 // brotli and gzip at startup and serves the smallest form the client accepts
@@ -143,8 +142,7 @@ var registry = func() map[string]Asset {
 		newAsset(corewasm.ExecFileName, corewasm.ExecJS(), contentTypeJS, corewasm.ExecHash()),          // gothic-core-exec.js
 		newAsset(corewasm.BootFileName, corewasm.BootJS(), contentTypeJS, corewasm.Version()),           // gothic-core-boot.js
 		newAsset("wasm_exec.js", wasmexec.Shim, contentTypeJS, wasmExecShimHash),                        // TinyGo shim
-		newAsset(vendorjs.HtmxFileName, vendorjs.HtmxJS(), contentTypeJS, vendorjs.HtmxVersion()),       // htmx.min.js (self-hosted)
-		newAsset(vendorjs.AmzExtFileName, vendorjs.AmzExtJS(), contentTypeJS, vendorjs.AmzExtVersion()), // amz-content-sha256.min.js
+		newAsset(vendorjs.HtmxFileName, vendorjs.HtmxJS(), contentTypeJS, vendorjs.HtmxVersion()), // htmx.min.js (self-hosted)
 	}
 	m := make(map[string]Asset, len(list))
 	for _, a := range list {

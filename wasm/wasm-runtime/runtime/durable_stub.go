@@ -2,7 +2,7 @@
 
 package runtime
 
-// Host-build no-ops for the Phase-18 durable state cache. The real
+// Host-build no-ops for the durable state cache. The real
 // implementations (js && wasm, durable.go) perform the core register/replay
 // handshake and per-field persistence. Server-side a durable component compiles
 // and renders exactly like a non-durable one — DurableObserve does nothing and

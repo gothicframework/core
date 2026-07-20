@@ -2,7 +2,7 @@ package runtime
 
 // Per-invocation active-scope resolution.
 //
-// Phase 13 replaces the old package-global single scope (cachedModuleID /
+// This replaces the old package-global single scope (cachedModuleID /
 // moduleID) with a resolver that lets ONE WASM instance own more than one
 // [data-gothic-scope] container. The pure-Go part of the machinery lives here,
 // with NO build tag, so it compiles into both build worlds:
@@ -29,7 +29,7 @@ var (
 // bootstrapScopeID is the default/fallback scope — the mount scope captured
 // once at init on js&&wasm (the old cachedModuleID). It is the scope the
 // instance's bootstrap keyed __gothic_set / __gothic_registry / __gothicInstances
-// under, so the Phase-12 halt slot and the dispatch shim must resolve to it.
+// under, so the halt slot and the dispatch shim must resolve to it.
 // Defaults to "_default" so host builds and un-bootstrapped runtimes behave
 // document-wide, unchanged from before.
 var bootstrapScopeID = "_default"
@@ -89,7 +89,7 @@ func parkScope() func() {
 
 // activeScope resolves the scope for the current invocation:
 //
-//  1. An explicit scope set by runInScope (async/programmatic paths, Phase 14
+//  1. An explicit scope set by runInScope (async/programmatic paths,
 //     multiplexing) wins unconditionally.
 //  2. Otherwise, if we are inside a synchronous user-event dispatch,
 //     findScopeFn() returns the event's [data-gothic-scope] and that wins.

@@ -159,7 +159,7 @@ func TestCodecRoundTrip(t *testing.T) {
 	})
 }
 
-// TestWireVersion pins down the frame-header contract (Phase 15): NewEncoder
+// TestWireVersion pins down the frame-header contract: NewEncoder
 // stamps WireVersion at byte 0, NewDecoder validates it and round-trips a good
 // frame, and a wrong/empty/truncated frame sets Err without panicking.
 func TestWireVersion(t *testing.T) {

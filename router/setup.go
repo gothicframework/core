@@ -85,15 +85,23 @@ func Setup(router chi.Router, config AppConfig, registerRoutes func(chi.Router))
 		}
 	}
 
-	if config.ServeStaticFiles == ALL_ENVS || isDev {
+	// Static /public/* serving. Dev ALWAYS serves fresh from disk (embed is a
+	// build-time snapshot; hot reload and `gothic wasm` output must be live).
+	// In non-dev: EMBEDDED serves from the baked-in embed.FS (single self-contained
+	// binary), DISK serves from the sidecar ./public folder, and CDN
+	// registers no handler (CloudFront/S3 serves the assets).
+	switch {
+	case isDev:
+		fileServer := http.StripPrefix("/public/", http.FileServer(http.Dir("./public/")))
+		router.Handle("/public/*", noCacheMiddleware(wasmAwareFileServer(fileServer)))
+	case config.ServeStaticFiles == EMBEDDED && embeddedPublicFS != nil:
+		slog.Info("application serving embedded public folder")
+		fileServer := http.StripPrefix("/public/", http.FileServer(http.FS(embeddedPublicFS)))
+		router.Handle("/public/*", immutableCacheMiddleware(wasmAwareFileServer(fileServer)))
+	case config.ServeStaticFiles == DISK:
 		slog.Info("application serving local public folder")
 		fileServer := http.StripPrefix("/public/", http.FileServer(http.Dir("./public/")))
-		wasmServer := wasmAwareFileServer(fileServer)
-		if isDev {
-			router.Handle("/public/*", noCacheMiddleware(wasmServer))
-		} else {
-			router.Handle("/public/*", immutableCacheMiddleware(wasmServer))
-		}
+		router.Handle("/public/*", immutableCacheMiddleware(wasmAwareFileServer(fileServer)))
 	}
 
 	router.Group(registerRoutes)

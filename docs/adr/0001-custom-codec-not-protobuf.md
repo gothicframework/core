@@ -50,7 +50,7 @@ Constraints that make this decision non-obvious:
 Keep the custom AST-generated, tagless, positional binary codec. Do **not**
 adopt Protobuf, Avro, or msgp as the wire format.
 
-Kill the drift risk with tests rather than a library. Phase 19 adds, in
+Kill the drift risk with tests rather than a library. The suite adds, in
 `wasm/wasm-runtime/runtime/`:
 
 - `codec_roundtrip_test.go` — executable round-trip coverage of **every**
@@ -68,14 +68,14 @@ We adopt the good **ideas** from the surveyed formats without adopting their
 formats:
 
 - **Avro's "tagless binary + external schema".** Our frames are tagless; the
-  "external schema" is the generated codec plus the Phase-15 schema descriptor
+  "external schema" is the generated codec plus the schema descriptor
   seam (see ADR 0002). This is where the size win comes from.
 - **Protobuf varint / zigzag.** Reserved as a *future* per-field optimization if
   profiling ever shows the fixed-width integers dominate a real payload. Not
   adopted pre-emptively (YAGNI); today fixed-width keeps encode/decode
   branch-free.
 - **Schema fingerprinting for skew.** Avro's schema-hash idea is realized as the
-  Phase-15 `schemaId` content hash, so version skew is *detectable* even though
+  `schemaId` content hash, so version skew is *detectable* even though
   nothing interprets the schema yet.
 
 ## Consequences
@@ -91,5 +91,5 @@ formats:
   an internal Gothic transport between Gothic-generated peers, not a public
   contract.
 - If a future requirement demands cross-language consumers or on-wire schema
-  evolution, revisit — the WireVersion byte (Phase 15) already reserves the
+  evolution, revisit — the WireVersion byte already reserves the
   break mechanism, and the schema seam (ADR 0002) reserves the descriptor.

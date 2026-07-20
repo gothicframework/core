@@ -38,8 +38,8 @@ Do **not** build a shared runtime that component modules link against. Instead:
 
 - The **core is a separate, full-Go module** (compiled with the standard
   `GOOS=js GOARCH=wasm` Go compiler, not TinyGo) that hosts the stdlib-heavy
-  services: the **topic hub** (Phase 17), the **durable page-session cache**
-  (Phase 18), and other services that want the full standard library.
+  services: the **topic hub**, the **durable page-session cache**, and other
+  services that want the full standard library.
 - **Components stay thin TinyGo modules** and **RPC into** the core over the
   JS/scalar/shared-memory bus. They do not link the core; they message it.
 - Runtime-byte "dedup" is achieved by *centralizing services in the one core
@@ -68,9 +68,8 @@ Do **not** build a shared runtime that component modules link against. Instead:
 ---
 
 These four ADRs underpin the Part II WASM re-architecture: the **WireVersion
-byte** (Phase 15, ADR 0001/0003), the **schema seam** (Phase 15/16, ADR 0002),
-the **topic hub consolidation** (Phase 17, ADR 0003/0004), and the **durable
-page-session cache** (Phase 18, ADR 0004). The codec's reliability — the reason
-we can own the wire format instead of adopting a serializer — is locked by the
-round-trip and fuzz tests added in Phase 19 (`codec_roundtrip_test.go`,
-`codec_fuzz_test.go`), per ADR 0001.
+byte** (ADR 0001/0003), the **schema seam** (ADR 0002), the **topic hub
+consolidation** (ADR 0003/0004), and the **durable page-session cache** (ADR
+0004). The codec's reliability — the reason we can own the wire format instead
+of adopting a serializer — is locked by the round-trip and fuzz tests
+(`codec_roundtrip_test.go`, `codec_fuzz_test.go`), per ADR 0001.

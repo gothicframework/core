@@ -21,16 +21,23 @@ const (
 	LOCAL_FILES
 )
 
-// StaticFilesMode controls when /public/* assets are served from local disk.
+// StaticFilesMode controls where /public/* assets are served from.
 type StaticFilesMode int
 
 const (
-	// HOT_RELOAD_ONLY (default) serves /public/* from disk only during development;
-	// in production CloudFront serves them from S3.
-	HOT_RELOAD_ONLY StaticFilesMode = iota
-	// ALL_ENVS serves /public/* from disk in every environment (the public folder
-	// must ship alongside the server binary).
-	ALL_ENVS
+	// CDN (default): the app does not serve /public/* in production — your CDN /
+	// object store does (on AWS that's CloudFront + S3; on other platforms, the
+	// equivalent). The app registers no /public/* handler outside of development,
+	// where it still serves from disk so hot reload works.
+	CDN StaticFilesMode = iota
+	// DISK: the app serves /public/* from the local ./public folder in every
+	// environment (the public/ folder ships alongside the server binary).
+	DISK
+	// EMBEDDED bakes ./public into the binary via go:embed and serves /public/*
+	// from that embed.FS in non-dev envs — a single self-contained binary with no
+	// sidecar public/ folder (intended for self-hosted container/VM deploys). In
+	// dev, files are still served fresh from disk regardless of this mode.
+	EMBEDDED
 )
 
 // CompressionMethod selects a compression algorithm for cached/served payloads.

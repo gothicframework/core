@@ -4,7 +4,7 @@ import "testing"
 
 // TestDurableEventNames pins the two-tier durable wire names. The full
 // register→write→replay round-trip over a live js/wasm core is exercised by the
-// Phase-21 wasm-durable-cache.spec.ts Playwright e2e; this locks the routing
+// wasm-durable-cache.spec.ts Playwright e2e; this locks the routing
 // strings that both the core adapter and the TinyGo runtime depend on (they
 // cannot share the constant — different modules — so drift here is a real bug).
 func TestDurableEventNames(t *testing.T) {

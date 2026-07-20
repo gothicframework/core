@@ -218,7 +218,7 @@ func RequestTopicSetFieldBytes(keyName, fieldName string, b []byte)     {}
 func ListenTopicEventField(keyName, fieldName string, fn func([]byte))  {}
 func ListenTopicSetReqField(keyName, fieldName string, fn func(string)) {}
 
-// Topic ↔ full-Go core control-plane (Phase 17). No-ops on the host build; the
+// Topic ↔ full-Go core control-plane. No-ops on the host build; the
 // real implementations (js && wasm, topic.go) perform the register handshake and
 // listen for the per-key online ack. Emitted by generated WASM code only, never
 // hand-written in a ClientSideState block, so no user-facing stub-parity list.

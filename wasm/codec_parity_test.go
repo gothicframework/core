@@ -480,7 +480,7 @@ func stripHeader(src string) string {
 	return strings.Join(lines[i:], "\n")
 }
 
-// TestWireVersionParity pins the Phase 15 frame-header contract across the
+// TestWireVersionParity pins the frame-header contract across the
 // server stub and the runtime parity copy: both stamp WireVersion at byte 0,
 // agree on the constant, and reject a wrong/empty version without panicking.
 func TestWireVersionParity(t *testing.T) {

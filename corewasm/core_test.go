@@ -60,7 +60,7 @@ func TestBootHashTracksBinaries(t *testing.T) {
 	}
 }
 
-// TestWriteIsMtimeStable is the Phase-16 acceptance criterion: because the static
+// TestWriteIsMtimeStable is the acceptance criterion: because the static
 // core sits in the hot-reload emission path (GenerateAll calls Write every build)
 // but is NEVER recompiled, a second Write with unchanged content must leave every
 // emitted file's modification time untouched — otherwise a hot-reload cycle would
@@ -119,7 +119,7 @@ func repoRoot(t *testing.T) string {
 
 // componentsRuntimeScripts locates the components module's runtimeScripts.templ.
 // After the Part III multi-repo split it lives in the sibling `components` module
-// (populated in Phase 30), not under `core`. When absent — a core-only build —
+// not under `core`. When absent — a core-only build —
 // the cross-module version-sync guard is skipped; it is re-exercised in the
 // workspace/e2e gate once components is co-located.
 func componentsRuntimeScripts(t *testing.T) []byte {
@@ -133,7 +133,7 @@ func componentsRuntimeScripts(t *testing.T) []byte {
 			return b
 		}
 	}
-	t.Skip("components module not co-located (populated in Phase 30); cross-module version-sync guard runs in the workspace/e2e gate")
+	t.Skip("components module not co-located; cross-module version-sync guard runs in the workspace/e2e gate")
 	return nil
 }
 

@@ -43,7 +43,7 @@ The load-bearing choices are captured as Architecture Decision Records under [`d
 
 ## The pre-existing "manager WASM as single source of truth" topic model
 
-**What we borrowed:** Gothic v2 already had the right *shape* for cross-component state — a manager WASM that owned the canonical encoded state for a topic key, diffed incoming writes byte-for-byte, and broadcast only changed fields to consumers. Phase 17 **generalized** that proven model: instead of one manager binary *per topic*, the single static core became the one generic, opaque store-and-forward hub for **all** keys, with the same per-field diff, per-field broadcast, replay-on-join, and online-ack behavior.
+**What we borrowed:** Gothic v2 already had the right *shape* for cross-component state — a manager WASM that owned the canonical encoded state for a topic key, diffed incoming writes byte-for-byte, and broadcast only changed fields to consumers. Gothic **generalized** that proven model: instead of one manager binary *per topic*, the single static core became the one generic, opaque store-and-forward hub for **all** keys, with the same per-field diff, per-field broadcast, replay-on-join, and online-ack behavior.
 
 **What we deliberately did *not* take:** the per-topic binary itself. Consolidating N manager binaries into one core removed N WASM loads per page and collapsed the N-instance leak surface — while keeping the exact user-facing topic API (`CreateTopic` / `PageTopic()` / `AddPageTopic()`) unchanged. The model was already correct; we kept the behavior and retired the duplication.
 

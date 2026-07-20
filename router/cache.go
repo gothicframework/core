@@ -27,8 +27,9 @@ const (
 	REDIS                 = config.REDIS
 	LOCAL_FILES           = config.LOCAL_FILES
 
-	HOT_RELOAD_ONLY = config.HOT_RELOAD_ONLY
-	ALL_ENVS        = config.ALL_ENVS
+	CDN = config.CDN
+	DISK        = config.DISK
+	EMBEDDED        = config.EMBEDDED
 
 	GZIP   = config.GZIP
 	BROTLI = config.BROTLI

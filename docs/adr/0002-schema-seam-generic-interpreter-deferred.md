@@ -7,7 +7,7 @@
 
 ## Context
 
-Phase 15 introduced a **schema seam** alongside the WireVersion byte: for each
+Gothic introduced a **schema seam** alongside the WireVersion byte: for each
 topic struct the codegen produces a schema descriptor literal and a `schemaId`
 content hash, and the generated topic constructors carry a registration slot for
 them (`SchemaID` / `SchemaDescriptorLit` in `buildWasmTopicFuncData` /

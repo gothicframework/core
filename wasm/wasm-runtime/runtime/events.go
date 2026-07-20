@@ -27,8 +27,8 @@ func GothicHaltChan() <-chan struct{} { return haltChan }
 
 // GothicRegisterSchema records a topic/component type's compact schema
 // descriptor under its content-hash id at the point the type registers. This is
-// the Phase 15 SCHEMA SEAM: a reserved, additive control-plane slot for a future
-// generic wire interpreter (Phase 16's core stores it opaquely). NOTHING
+// the SCHEMA SEAM: a reserved, additive control-plane slot for a future
+// generic wire interpreter (the core stores it opaquely). NOTHING
 // interprets it in v3.0 — it is written once, off the data-plane, and never read
 // back by any 3.0 consumer. The descriptor is deposited on window.__gothicSchemas
 // (keyed by schemaID) so the core can later pick it up without a wire change.
@@ -52,7 +52,7 @@ func GothicRegisterSchema(key, schemaID, descriptor string) {
 }
 
 // GothicRegisterWithCore performs the component→core registration RPC against the
-// Phase-16 full-Go static core over the `document` control-plane bus. It hands
+// full-Go static core over the `document` control-plane bus. It hands
 // the core an OPAQUE schema descriptor keyed by (scopeID, schemaID): the core
 // records {scopeId, schemaId, schema} verbatim and acks — it never interprets the
 // descriptor (the generic interpreter is DEFERRED).
@@ -142,7 +142,7 @@ func GothicRegisterWithCore(scopeID, schemaID, schema string) {
 // sync.Once so a double-fire from the MutationObserver cannot double-close the
 // channel. The js.Func is retained in keep for the instance's lifetime.
 //
-// This init also arms the Phase-13 scope resolver: it captures the mount scope
+// This init also arms the scope resolver: it captures the mount scope
 // into bootstrapScopeID and points findScopeFn (declared in scope.go) at the
 // JS DOM walk. Both must be set before any scope is resolved; scope reads only
 // happen once the generated main() runs, which is strictly after every init(),
@@ -212,10 +212,10 @@ func captureBootstrapScope() string {
 //
 //  2. Publishes a per-instance __gothic_register_scope(id) callback onto this
 //     module's window.__gothicInstances[<bootstrapScope>] slot (the same slot the
-//     Phase-12 __halt lives on). The bootstrap JS invokes it for every SUBSEQUENT
+//     __halt lives on). The bootstrap JS invokes it for every SUBSEQUENT
 //     placement of the same component type, running the SAME body under
 //     runInScope(id). Each invocation re-runs body, creating FRESH observables
-//     and callbacks via new closures — this is why Phase 13's scope refactor is
+//     and callbacks via new closures — this is why the scope refactor is
 //     the gate for multiplexing: one instance hosts N independent scopes, each
 //     with its own state, all resolved per active scope.
 //
@@ -297,7 +297,7 @@ func findScope() string {
 // listener to the scope that created it. For a single-scope instance the
 // captured scope IS bootstrapScope, so the body sees exactly the scope the old
 // moduleID() would have returned at fire time — byte-identical. For a
-// multi-scope instance (Phase 14) each scope's ClientSideState registers under
+// multi-scope instance each scope's ClientSideState registers under
 // runInScope(scopeID), so its listeners capture and re-establish that scope.
 func scopedListener(body func()) js.Func {
 	scope := activeScope()

@@ -33,9 +33,9 @@ data-plane JSON too, "so it's all one format." That reintroduces the heap crash.
 Split the protocol into two tiers, permanently:
 
 - **Data-plane stays BINARY.** Per-field reactive broadcasts are encoded with the
-  custom codec and routed **opaquely by key** through the topic hub (Phase 17) —
-  the hub moves frames by their key without decoding them. The Phase-16 core and
-  the WireVersion byte (Phase 15) sit under this path. The direct-memory
+  custom codec and routed **opaquely by key** through the topic hub —
+  the hub moves frames by their key without decoding them. The full-Go static
+  core and the WireVersion byte sit under this path. The direct-memory
   `dispatchDirect` transport keeps even the JS bridge crossing allocation-free.
 - **Control-plane is JSON / plain strings.** register, unregister, ping, online,
   and config are small, infrequent, and encoded as JSON or plain strings for

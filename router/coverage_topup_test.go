@@ -174,7 +174,7 @@ func TestSetupDevMode(t *testing.T) {
 	config := AppConfig{
 		CacheStrategy:         CACHE_CONTROL_HEADERS,
 		LocalDevelopmentCache: IN_MEMORY,
-		ServeStaticFiles:      ALL_ENVS,
+		ServeStaticFiles:      DISK,
 	}
 
 	r := chi.NewRouter()

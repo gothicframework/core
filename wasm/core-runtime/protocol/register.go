@@ -1,5 +1,5 @@
 // Package protocol holds the PURE, host-testable decision logic of the Gothic
-// full-Go static core's control plane (Phase 16). It has no js.Value / syscall/js
+// full-Go static core's control plane. It has no js.Value / syscall/js
 // dependency, so it compiles and runs under the standard host toolchain and can
 // be unit-tested without a WASM runtime. The core's main package
 // (pkg/wasm/core-runtime, //go:build js && wasm) is a thin js.Value adapter that

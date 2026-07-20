@@ -13,7 +13,7 @@ import (
 // for a server-rendered route. It is intentionally kept tiny so it can be tested
 // without spinning up the rest of the routes package.
 //
-// Phase 15 (shared core asset): the idempotent, per-page-once globals
+// Shared core asset: the idempotent, per-page-once globals
 // (__gothic_topic, __gothicDispatchAsync, __gothicFindScope, __gothicInstances,
 // __gothicTeardown, the unmount MutationObserver, and the multiplexing structures
 // + mux teardown wrapper) NO LONGER live inline in this per-instance script. They
@@ -48,7 +48,7 @@ func injectGothicScope(html []byte, wasmName string) ([]byte, string) {
 	return injectGothicScopeDurable(html, wasmName, "")
 }
 
-// injectGothicScopeDurable is injectGothicScope with the Phase-18 DURABLE opt-in:
+// injectGothicScopeDurable is injectGothicScope with the DURABLE opt-in:
 // when durableKey is non-empty it also stamps data-gothic-durable-key on the
 // wrapper so a re-mounting component rehydrates its state from the full-Go core
 // under that STABLE key (the runtime's DurableKey reads it; DurableObserve keys

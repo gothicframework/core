@@ -44,7 +44,7 @@ func TestMultiplexedBootstrap_MuxBranchPresent(t *testing.T) {
 		}
 	}
 
-	// Phase 15: the once-installed last-scope-out teardown wrapper that halts the
+	// The once-installed last-scope-out teardown wrapper that halts the
 	// shared instance moved into gothic-core.js (installed unconditionally there).
 	coreWants := []string{
 		`__gothicMuxTeardownInstalled`,
@@ -60,7 +60,7 @@ func TestMultiplexedBootstrap_MuxBranchPresent(t *testing.T) {
 
 // TestNonMultiplexedBootstrap_NoMuxBranch is the inverse guard: a
 // non-multiplexed render must NOT contain any of the mux machinery, so the
-// default path stays byte-identical to before Phase 14.
+// default path stays byte-identical to the non-multiplexed baseline.
 func TestNonMultiplexedBootstrap_NoMuxBranch(t *testing.T) {
 	in := []byte(`<html><body>x</body></html>`)
 	out := injectWasmBootstrap(in, "counter", GZIP, GothicTinyGo, "abc", false)

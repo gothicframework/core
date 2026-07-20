@@ -8,7 +8,7 @@ import "testing"
 // these tests exercise the pure-Go parts directly. The two-scope dispatch-routing
 // assertion (one WASM instance owning two [data-gothic-scope] containers, events
 // routed to the correct scope) is only observable under js && wasm in a browser
-// and is authored as a Playwright spec in Phase 20 on TestGothic.
+// and is authored as a Playwright spec on TestGothic.
 
 // saveScopeGlobals snapshots the package-level scope carrier so a test can mutate
 // it freely and restore it, keeping tests independent.
@@ -40,8 +40,8 @@ func TestRunInScopeSaveRestore(t *testing.T) {
 }
 
 // TestRunInScopeRestoresPrevExplicit proves save/restore restores an ALREADY
-// active outer scope (not just the empty state) — the nesting contract Phase 14
-// relies on.
+// active outer scope (not just the empty state) — the nesting contract
+// multiplexing relies on.
 func TestRunInScopeRestoresPrevExplicit(t *testing.T) {
 	saveScopeGlobals(t)
 	currentScope, currentScopeActive = "", false

@@ -1,7 +1,7 @@
 // Package gothiccore owns gothic-core.js: the shared, idempotent client runtime
 // globals that used to be inlined into every per-instance WASM bootstrap script.
 //
-// Phase 15 extracts them into a single static asset so the browser fetches and
+// They are extracted into a single static asset so the browser fetches and
 // parses them ONCE per page (cached across renders and HTMX fragments) instead
 // of re-shipping the ~4 KB preamble inside every component's inline <script>.
 // The layout references it once in <head>; the per-instance bootstrap only
@@ -33,7 +33,7 @@ const FileName = "gothic-core.js"
 // structures and the once-installed mux teardown wrapper — with one change: the
 // MutationObserver install is deferred to DOMContentLoaded when document.body is
 // not yet present (this script runs from <head>, before the body exists).
-const JS = `// gothic-core.js — shared idempotent Gothic WASM runtime (Phase 15).
+const JS = `// gothic-core.js — shared idempotent Gothic WASM runtime.
 // Loaded once per page from the layout <head>; installs window globals used by
 // every per-instance WASM bootstrap. All installs are guarded so it is safe to
 // load more than once. Interpreted by nothing but the Gothic runtime.
@@ -66,7 +66,7 @@ const JS = `// gothic-core.js — shared idempotent Gothic WASM runtime (Phase 1
                     if(handlers){handlers.forEach(function(h){queueMicrotask(function(){h(view);});});}
                 },
                 // setBytes: store an already-materialized Uint8Array under keyName
-                // (Phase 17). The full-Go static core uses this to rebroadcast a
+                // The full-Go static core uses this to rebroadcast a
                 // per-field topic frame VERBATIM — it has no per-instance __gothic_set
                 // slot (that is a TinyGo bootstrap detail), so it hands us bytes via
                 // CopyBytesToJS instead of a raw linear-memory pointer. Pooled like set().
@@ -136,7 +136,7 @@ const JS = `// gothic-core.js — shared idempotent Gothic WASM runtime (Phase 1
     }
     // __gothicInstallProxy(name): install the global click/input proxy window[name]
     // that HTML onclick/oninput/onchange attributes invoke, as INSTANCE-AGNOSTIC
-    // pure JS (Phase 24). It resolves the target callback per invocation off the
+    // pure JS. It resolves the target callback per invocation off the
     // LIVE window.__gothic_registry (scope→name→js.Func), mirroring the Go
     // dispatch() scope-then-first-match logic. Because it is not owned by any one
     // WASM instance, tearing an instance down (which deletes its
@@ -161,7 +161,7 @@ const JS = `// gothic-core.js — shared idempotent Gothic WASM runtime (Phase 1
         };
     }
     // __gothicDurableKey(scopeId): resolve the STABLE durable key a placement
-    // declared (Phase 18). Scope ids are random per mount, so durable state is
+    // declared. Scope ids are random per mount, so durable state is
     // keyed by data-gothic-durable-key instead — read it off the scope's wrapper,
     // falling back to a scoped descendant carrying the attribute (user-supplied in
     // their templ). Returns '' (not durable) when absent. Returning a plain string

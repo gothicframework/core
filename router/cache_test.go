@@ -360,7 +360,7 @@ func TestSetupDevServesPublicFolder(t *testing.T) {
 
 	r := chi.NewRouter()
 	Setup(r, AppConfig{
-		ServeStaticFiles: HOT_RELOAD_ONLY,
+		ServeStaticFiles: CDN,
 	}, func(r chi.Router) {})
 
 	// The /public/* route should be registered in dev mode
@@ -383,31 +383,31 @@ func TestSetupProdNoPublicFolder(t *testing.T) {
 
 	r := chi.NewRouter()
 	Setup(r, AppConfig{
-		ServeStaticFiles: HOT_RELOAD_ONLY,
+		ServeStaticFiles: CDN,
 	}, func(r chi.Router) {})
 
-	// The /public/* route should NOT be registered in prod mode with HOT_RELOAD_ONLY
+	// The /public/* route should NOT be registered in prod mode with CDN
 	req := httptest.NewRequest("GET", "/public/test.css", nil)
 	rec := httptest.NewRecorder()
 	r.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusNotFound {
-		t.Errorf("expected 404 for /public/* in prod mode with HOT_RELOAD_ONLY, got %d", rec.Code)
+		t.Errorf("expected 404 for /public/* in prod mode with CDN, got %d", rec.Code)
 	}
 
 	resetGlobalCache()
 }
 
-func TestSetupAllEnvsServesPublicFolder(t *testing.T) {
+func TestSetupDiskServesPublicFolder(t *testing.T) {
 	resetGlobalCache()
 	t.Setenv("GOTHIC_MODE", "")
 
 	r := chi.NewRouter()
 	Setup(r, AppConfig{
-		ServeStaticFiles: ALL_ENVS,
+		ServeStaticFiles: DISK,
 	}, func(r chi.Router) {})
 
-	// The /public/* route should be registered even in prod mode with ALL_ENVS
+	// The /public/* route should be registered even in prod mode with DISK
 	req := httptest.NewRequest("GET", "/public/test.css", nil)
 	rec := httptest.NewRecorder()
 	r.ServeHTTP(rec, req)
@@ -415,7 +415,7 @@ func TestSetupAllEnvsServesPublicFolder(t *testing.T) {
 	// We expect a 404 (file doesn't exist) rather than 405 (method not allowed),
 	// which proves the route IS registered.
 	if rec.Code == http.StatusMethodNotAllowed {
-		t.Error("expected /public/* route to be registered in prod mode with ALL_ENVS")
+		t.Error("expected /public/* route to be registered in prod mode with DISK")
 	}
 
 	resetGlobalCache()

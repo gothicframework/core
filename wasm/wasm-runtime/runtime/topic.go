@@ -561,10 +561,10 @@ func PingUntilOnline(keyName string, isOnline func() bool) {
 	}()
 }
 
-// ── Topic ↔ full-Go core control-plane (Phase 17) ────────────────────────────
+// ── Topic ↔ full-Go core control-plane ───────────────────────────────────────
 //
 // The per-topic MANAGER WASM is retired: the always-loaded full-Go static core
-// (Phase 16) is now the single, generic topic hub. The DATA-PLANE is unchanged —
+// is now the single, generic topic hub. The DATA-PLANE is unchanged —
 // per-field binary frames on gothic:topic-req:<key>:<field> (RequestTopicSetField,
 // sender→hub) and gothic:topic:<key>:<field> (ListenTopicEventField, hub→consumers).
 // The core store-and-forwards those frames OPAQUELY by key+field string, never

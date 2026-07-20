@@ -3,7 +3,7 @@ package protocol
 import "testing"
 
 // TestDecideRegister covers the pure record→ack decision. The full register→ack
-// round-trip over a live js/wasm core instance is exercised by the Phase-21
+// round-trip over a live js/wasm core instance is exercised by the
 // wasm-core.spec.ts Playwright e2e; this pins the decision logic that e2e sits on
 // top of.
 func TestDecideRegister(t *testing.T) {

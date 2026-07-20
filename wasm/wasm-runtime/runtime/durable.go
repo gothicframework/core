@@ -4,9 +4,9 @@ package runtime
 
 import "syscall/js"
 
-// durable.go is the TinyGo runtime side of the Phase-18 DURABLE STATE CACHE. It
+// durable.go is the TinyGo runtime side of the DURABLE STATE CACHE. It
 // lets a component OPT IN to page-session persistence: its reactive state SURVIVES
-// its own Phase-12 teardown → re-mount (an HTMX swap-away/back, or a Multiplexed
+// its own teardown → re-mount (an HTMX swap-away/back, or a Multiplexed
 // list re-render), rehydrating from the always-loaded full-Go static core instead
 // of refetching from the server.
 //
@@ -32,7 +32,7 @@ import "syscall/js"
 //     __gothic_topic buffer plumbing (dispatchDirect / the scoped doc listeners),
 //     so no new JS transport is needed and the core stays opaque.
 //
-// # Rehydrate-before-the-component-goes-live ordering (reused from Phase 17)
+// # Rehydrate-before-the-component-goes-live ordering
 //
 // On mount DurableObserve installs the field's replay listener + a persistence
 // effect (gated OFF until online), then registers with the core. The core replays

@@ -3,7 +3,7 @@ package protocol
 import "bytes"
 
 // topic.go holds the PURE, host-testable decision logic of the full-Go static
-// core's TOPIC HUB (Phase 17). The core consolidates what used to be N per-topic
+// core's TOPIC HUB. The core consolidates what used to be N per-topic
 // MANAGER WASM instances into a single generic, OPAQUE store-and-forward hub.
 //
 // # Two-tier protocol

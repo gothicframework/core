@@ -3,7 +3,7 @@ package protocol
 import "testing"
 
 // TestTopicEventNames pins the two-tier wire names. The full register→forward
-// round-trip over a live js/wasm core is exercised by the Phase-21
+// round-trip over a live js/wasm core is exercised by the
 // wasm-topic-consolidation.spec.ts Playwright e2e; this locks the routing strings
 // that both the core adapter and the TinyGo runtime depend on (they cannot share
 // the constant — different modules — so drift here is a real bug).

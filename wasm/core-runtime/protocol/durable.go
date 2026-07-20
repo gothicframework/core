@@ -3,13 +3,13 @@ package protocol
 import "bytes"
 
 // durable.go holds the PURE, host-testable decision logic of the full-Go static
-// core's DURABLE STATE CACHE (Phase 18). It extends the Phase-17 topic-store idea
+// core's DURABLE STATE CACHE. It extends the topic-store idea
 // to arbitrary per-component state: a component that is NOT a shared topic but
 // wants its state to SURVIVE its own teardown → re-mount within a page session.
 //
 // # Why this is separate from the topic hub
 //
-// A TOPIC (Phase 17) is a LIVE bus shared by N components: a write from one
+// A TOPIC is a LIVE bus shared by N components: a write from one
 // consumer must be re-broadcast to every other consumer. A DURABLE component is
 // PRIVATE to one placement: the core's only job is to STORE its per-field frames
 // and REPLAY them when the same placement re-mounts (its scope id is random per

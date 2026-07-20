@@ -53,7 +53,7 @@ func TestInjectGothicScope_Fragment(t *testing.T) {
 	}
 }
 
-// TestInjectGothicScopeDurable_OptInStampsAttribute verifies the Phase-18 opt-in:
+// TestInjectGothicScopeDurable_OptInStampsAttribute verifies the opt-in:
 // a non-empty durable key stamps data-gothic-durable-key on the wrapper (so the
 // runtime's DurableKey resolves it and rehydrates from the core), on both the
 // full-page and fragment paths.
@@ -200,7 +200,7 @@ func TestInjectWasmEnvelope_EndToEnd_Fragment(t *testing.T) {
 // per-broadcast Uint8Array leaks into the _values[] slot table — keeping a
 // persistent buffer means each key occupies exactly one slot for its lifetime.
 func TestInjectWasmBootstrap_CtxSetPersistentBuffer(t *testing.T) {
-	// Phase 15: the persistent-buffer topic store moved out of the per-instance
+	// The persistent-buffer topic store moved out of the per-instance
 	// bootstrap into the shared gothic-core.js asset. Assert it lives there now.
 	core := gothiccore.JS
 	wants := []string{
@@ -241,7 +241,7 @@ func TestInjectWasmBootstrap_CtxSetNoSlice(t *testing.T) {
 // MouseEvent / Element through js.Value would leak a _values[] slot per
 // click because those refs are never released.
 func TestInjectWasmBootstrap_FindScopeHelperInjected(t *testing.T) {
-	// Phase 15: __gothicFindScope moved into gothic-core.js.
+	// __gothicFindScope moved into gothic-core.js.
 	wants := []string{
 		`window.__gothicFindScope=function()`,
 		// Guard: a document/window-targeted event has no .closest — must not throw
@@ -302,7 +302,7 @@ func TestInjectWasmEnvelope_UniqueAcrossCalls(t *testing.T) {
 	}
 }
 
-// TestInjectWasmBootstrap_ReferencesGothicCore verifies Phase 15's extraction:
+// TestInjectWasmBootstrap_ReferencesGothicCore verifies the shared-core extraction:
 // the per-instance script references the shared gothic-core.js asset (via the
 // defensive _ensureCore loader carrying the content-hash cache-buster) and no
 // longer inlines the shared preamble globals.
@@ -448,14 +448,14 @@ func TestInjectWasmBootstrap_HxBoostFallbackSelector(t *testing.T) {
 	}
 }
 
-// TestInjectWasmBootstrap_TeardownPreambleInjected verifies Phase 12: the
+// TestInjectWasmBootstrap_TeardownPreambleInjected verifies the
 // bootstrap emits the per-scope teardown machinery — a single global
 // MutationObserver on document.body, the __gothicTeardown function, the
 // __gothicInstances registry, and the topic _unsubscribeScope hook — so an
 // HTMX swap that removes a [data-gothic-scope] subtree drops the instance's
 // references instead of leaking the WebAssembly.Instance forever.
 func TestInjectWasmBootstrap_TeardownPreambleInjected(t *testing.T) {
-	// Phase 15: the per-scope teardown machinery moved into gothic-core.js.
+	// The per-scope teardown machinery moved into gothic-core.js.
 	core := gothiccore.JS
 	coreWants := []string{
 		// MutationObserver detection wired to document.body, whole-subtree.

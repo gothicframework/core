@@ -238,7 +238,7 @@ func TestTopicDispatchAPISurface(t *testing.T) {
 		_ func(keyName, fieldName string, b []byte)        = RequestTopicSetFieldBytes
 		_ func(keyName, fieldName string, fn func([]byte)) = ListenTopicEventField
 		_ func(keyName, fieldName string, fn func(string)) = ListenTopicSetReqField
-		// Phase 17 topic ↔ core control-plane.
+		// Topic ↔ core control-plane.
 		_ func(key string, fields []string) = RegisterTopicWithCore
 		_ func(key string, fn func())       = ListenTopicCoreOnline
 	)

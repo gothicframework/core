@@ -1,5 +1,5 @@
-// Package corewasm owns the Gothic Framework full-Go STATIC CORE artifact
-// (Phase 16): the prebuilt, type-agnostic RPC/registration hub compiled with the
+// Package corewasm owns the Gothic Framework full-Go STATIC CORE artifact:
+// the prebuilt, type-agnostic RPC/registration hub compiled with the
 // standard Go toolchain (GOOS=js GOARCH=wasm) so it has the full standard library
 // TinyGo lacks. See pkg/wasm/core-runtime for the core's source and the rationale
 // for full-Go + static.
@@ -88,7 +88,7 @@ var execHash = hash16(execJS)
 // Content-Type cannot break the boot. The core.wasm + exec URLs carry their own
 // content hashes, so this loader's OWN content — and therefore its hash — changes
 // whenever either binary changes.
-var bootJS = "// gothic-core-boot.js — boots the Gothic full-Go static core once per page (Phase 16).\n" +
+var bootJS = "// gothic-core-boot.js — boots the Gothic full-Go static core once per page.\n" +
 	"// Loaded once from the layout <head>. Instantiates public/gothic-core.wasm through\n" +
 	"// its own wasm_exec slot so the standard-Go `Go` constructor coexists with TinyGo\n" +
 	"// components. A __gothicCoreBooting latch guards against a double boot; it is CLEARED\n" +
