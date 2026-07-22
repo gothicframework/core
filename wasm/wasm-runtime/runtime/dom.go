@@ -212,6 +212,11 @@ func GetFileBytes(id string) []byte {
 		uint8Array := js.Global().Get("Uint8Array").New(arrayBuffer)
 		data := make([]byte, uint8Array.Get("length").Int())
 		js.CopyBytesToGo(data, uint8Array)
+		// Return the wrapper's bridge slot to the pool right after the copy — on
+		// TinyGo 0.41.1 (no js.Value finalizer) it would otherwise leak one slot
+		// per file read. Safe here because this runs inside the FileReader onload
+		// js.Func, so the active bridge frame is set (see __gothicReleaseBoxed).
+		releaseBoxed(uint8Array)
 		ch <- result{data: data, ok: true}
 		return nil
 	})
