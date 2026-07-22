@@ -11,7 +11,13 @@ type Config struct {
 	TofuBinaryPath string
 	DockerfilePath string
 	WasmBinary     string
-	TailwindBinary string
+	// WasmTinyGoVersion overrides the managed TinyGo version the CLI downloads to
+	// compile page WASM. A value in the ‹base›-gothic.‹n› form (e.g.
+	// "0.41.1-gothic.1") routes the download to Gothic's TinyGo fork and, via the
+	// CLI's toolchain capability profile, selects the matching wasm_exec runtime.
+	// Empty uses the bundled default. See cli/docs/patched-tinygo-channel.md.
+	WasmTinyGoVersion string
+	TailwindBinary    string
 	OptimizeImages OptimizeImagesConfig
 	// Runtime is the routing/caching configuration the generated main.go hands to
 	// gothicServer.Middleware. It is read at runtime (not by the CLI's config

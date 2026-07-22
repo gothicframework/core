@@ -22,7 +22,6 @@ import (
 	"github.com/andybalholm/brotli"
 	"github.com/gothicframework/core/corewasm"
 	"github.com/gothicframework/core/gothiccore"
-	"github.com/gothicframework/core/vendorjs"
 	wasmexec "github.com/gothicframework/core/wasmexec"
 )
 
@@ -50,7 +49,6 @@ func main() {
 		{corewasm.ExecFileName, corewasm.ExecJS()},
 		{corewasm.BootFileName, corewasm.BootJS()},
 		{"wasm_exec.js", wasmexec.Shim},
-		{vendorjs.HtmxFileName, vendorjs.HtmxJS()},
 	}
 	for _, a := range assets {
 		writeVariant(a.name+".br", brotliMax(a.data), len(a.data))

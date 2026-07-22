@@ -4,14 +4,14 @@ package runtime
 
 import "syscall/js"
 
-// HTMX is an ergonomic Go mirror of the vendored htmx 2.0.3 JavaScript API
-// (window.htmx, a classic global installed by core/vendorjs). It lets a
+// HTMX is an ergonomic Go mirror of the htmx 2.0.3 JavaScript API (window.htmx,
+// a classic global installed by the static core WASM at boot). It lets a
 // ClientSideState block drive htmx imperatively — swap fragments, fire and
 // listen for htmx events, toggle classes, run ajax — without hand-writing
 // js.Global().Get("htmx") plumbing. Every method is a safe no-op when htmx has
-// not yet loaded (it is injected `defer` in <head>, so at first paint the global
-// may be absent); calls guard js.htmx.IsUndefined() rather than caching the ref,
-// re-fetching it lazily on each call.
+// not yet loaded (the static core installs it during its boot, so at first paint
+// the global may be absent); calls guard js.htmx.IsUndefined() rather than caching
+// the ref, re-fetching it lazily on each call.
 var HTMX htmxAPI
 
 // htmxAPI is the unexported receiver type behind the HTMX singleton.
@@ -40,7 +40,7 @@ const (
 )
 
 // HtmxEvent is a string-backed htmx event name. The consts below are the full
-// htmx 2.0.3 event catalog (verified against core/vendorjs/htmx.min.js); a custom
+// htmx 2.0.3 event catalog (verified against the htmx 2.0.3 source); a custom
 // or extension event stays reachable via a string cast, e.g.
 // HtmxEvent("htmx:sse:message").
 type HtmxEvent string
@@ -338,11 +338,19 @@ func (htmxAPI) Remove(target string) {
 
 // hxReg records one On/OnGlobal listener so Off and teardown can detach + release
 // it exactly once. sel == "" means the listener is document-wide (2-arg htmx.on).
+//
+// bound tracks whether htmx.on has actually run yet: On/OnGlobal may be called
+// from a component's ClientSideState BEFORE the static core WASM has installed
+// window.htmx (the core boots asynchronously and can land after a component), in
+// which case the real htmx.on is deferred until the core announces readiness (see
+// hxRegister / deferHxBind). release() must therefore only htmx.off a listener it
+// actually attached.
 type hxReg struct {
 	scope    string
 	event    string
 	sel      string
 	f        js.Func
+	bound    bool
 	released bool
 }
 
@@ -369,11 +377,27 @@ func (r *hxReg) release(hx js.Value) {
 		return
 	}
 	r.released = true
-	func() {
-		defer func() { _ = recover() }()
-		hxOnOff(hx, "off", r.sel, r.event, r.f)
-	}()
+	// Only detach a listener we actually attached. A deferred registration whose
+	// core never came online (or that tore down before it did) is unbound — there
+	// is nothing to htmx.off, and hx may even be undefined here.
+	if r.bound && !hx.IsUndefined() {
+		func() {
+			defer func() { _ = recover() }()
+			hxOnOff(hx, "off", r.sel, r.event, r.f)
+		}()
+	}
 	r.f.Release() // always — the only GC path for the listener js.Func
+}
+
+// bind performs the deferred htmx.on exactly once, and only while the
+// registration is still live (a teardown before the core came online marks it
+// released, so a late gothic:core:online must not resurrect it).
+func (r *hxReg) bind(hx js.Value) {
+	if r.bound || r.released {
+		return
+	}
+	r.bound = true
+	hxOnOff(hx, "on", r.sel, r.event, r.f)
 }
 
 // hxRegister wires an On (subtree=true) or OnGlobal (subtree=false) listener:
@@ -382,10 +406,10 @@ func (r *hxReg) release(hx js.Value) {
 // document.body for global ones), records it for Off, and schedules automatic
 // detach + Release on component teardown through OnUnmount.
 func hxRegister(subtree bool, e HtmxEvent, h func(Event)) {
-	hx := htmxJS()
-	if hx.IsUndefined() {
-		return
-	}
+	// Capture scope + selector SYNCHRONOUSLY: activeScope() is only meaningful in
+	// this call turn, and the scope root element is in the DOM now (the page is
+	// rendered before ClientSideState runs). The captured selector string stays
+	// valid for the deferred bind because the component is still mounted then.
 	scope := activeScope()
 	sel := ""
 	if subtree {
@@ -397,8 +421,52 @@ func hxRegister(subtree bool, e HtmxEvent, h func(Event)) {
 	// (that would leave one stale post-Release entry per On for the page life).
 	reg := &hxReg{scope: scope, event: string(e), sel: sel, f: f}
 	hxRegs = append(hxRegs, reg)
-	hxOnOff(hx, "on", sel, string(e), f)
-	OnUnmount(func() { reg.release(hx) })
+	// Teardown ALWAYS releases f (and htmx.off's it if it was bound), whether or
+	// not the deferred bind ever ran.
+	OnUnmount(func() { reg.release(htmxJS()) })
+
+	if hx := htmxJS(); !hx.IsUndefined() {
+		reg.bind(hx)
+		return
+	}
+	// window.htmx is not installed yet. The static core WASM installs it during its
+	// own boot, which is asynchronous and can land AFTER this component's
+	// ClientSideState runs (exactly the race GothicRegisterWithCore handles for the
+	// register RPC). Early-returning here would silently drop the listener forever —
+	// instead defer the htmx.on until the core announces gothic:core:online.
+	deferHxBind(reg)
+}
+
+// deferHxBind arms a one-shot gothic:core:online listener that runs reg.bind once
+// the static core has installed window.htmx. It mirrors GothicRegisterWithCore's
+// core-comes-up-later handshake: the deferred path is only taken while htmx is
+// undefined (i.e. the core has NOT yet announced online), so the online announce
+// is guaranteed to be in the future and this listener will catch it. The listener
+// js.Func is released either when it fires-and-binds or on component teardown,
+// whichever comes first, so no js.Func leaks if the core never comes online.
+func deferHxBind(reg *hxReg) {
+	d := doc()
+	var onlineFn js.Func
+	done := false
+	cleanup := func() {
+		if done {
+			return
+		}
+		done = true
+		d.Call("removeEventListener", evCoreOnline, onlineFn)
+		onlineFn.Release()
+	}
+	onlineFn = js.FuncOf(func(this js.Value, args []js.Value) interface{} {
+		hx := htmxJS()
+		if hx.IsUndefined() {
+			return nil // a later announce will carry an installed htmx
+		}
+		reg.bind(hx) // no-op if the component already tore down
+		cleanup()
+		return nil
+	})
+	d.Call("addEventListener", evCoreOnline, onlineFn)
+	OnUnmount(cleanup)
 }
 
 // hxOnOff calls htmx.on / htmx.off, picking the 2-arg document form (sel == "")

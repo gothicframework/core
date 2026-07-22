@@ -315,18 +315,10 @@
 						// Do not sleep, only reactivate scheduler after the given timeout.
 						setTimeout(() => {
 							if (this.exited) return;
-							// A blocked goroutine's continuation (e.g. the Fetch body
-							// reader resumed after arrayBuffer() settles) runs on this
-							// scheduler tick, so publish the active bridge frame here
-							// too — see _resume and __gothicReleaseBoxed.
-							const prevActive = global.__gothicActiveInstance;
-							global.__gothicActiveInstance = this;
 							try {
 								this._inst.exports.go_scheduler();
 							} catch (e) {
 								if (e !== wasmExit) throw e;
-							} finally {
-								global.__gothicActiveInstance = prevActive;
 							}
 						}, Number(timeout)/1e6);
 					},
@@ -565,74 +557,22 @@
 			if (this.exited) {
 				throw new Error("Go program has already exited");
 			}
-			// Publish this instance as the active bridge frame while its Go code
-			// runs, so a callback can force-free a slot in THIS instance's ref
-			// table via __gothicReleaseBoxed (the Fetch body reader does this for
-			// its one-shot Uint8Array). All instances share `global`, so the target
-			// cannot be a plain global — it must be the running frame. Save/restore
-			// keeps nested Go→JS→Go re-entries correct.
-			const prevActive = global.__gothicActiveInstance;
-			global.__gothicActiveInstance = this;
 			try {
 				this._inst.exports.resume();
 			} catch (e) {
 				if (e !== wasmExit) throw e;
-			} finally {
-				global.__gothicActiveInstance = prevActive;
 			}
 			if (this.exited) {
 				this._resolveExitPromise();
 			}
 		}
 
-		// _releaseValue force-frees a JS value's ref-table slot (same teardown as
-		// the finalizeRef import). TinyGo has no GC finalizers, so syscall/js never
-		// calls finalizeRef and boxed values leak forever; this reclaims values that
-		// are provably dead. See _makeFuncWrapper.
-		_releaseValue(v) {
-			if (v === undefined || v === null) return;
-			const id = this._ids.get(v);
-			if (id === undefined) return;
-			this._values[id] = null;
-			this._ids.delete(v);
-			this._goRefCounts[id] = 0;
-			this._idPool.push(id);
-		}
-
-		// Install the shared bridge for Go-initiated slot reclamation exactly once.
-		// __gothicActiveInstance names whichever Go instance is currently running
-		// (set around every wasm entry in _resume and the scheduler tick);
-		// __gothicReleaseBoxed force-frees a slot in THAT instance's table. Go
-		// reaches this via js.Global() (shared across all instances), so the target
-		// instance must be threaded through the active frame rather than a
-		// per-instance global. See runtime/dom.go releaseBoxed.
-		_installReleaseBridge() {
-			if (global.__gothicReleaseBoxed) return;
-			global.__gothicReleaseBoxed = (v) => {
-				const go = global.__gothicActiveInstance;
-				if (go) go._releaseValue(v);
-			};
-		}
-
 		_makeFuncWrapper(id) {
-			this._installReleaseBridge();
 			const go = this;
-			return function () {
+			return function() {
 				const event = { id: id, this: this, args: arguments };
 				go._pendingEvent = event;
 				go._resume();
-				// TinyGo never finalizes js.Values, so the per-invocation event object
-				// and its args object (boxed while Go read them) would leak a _values
-				// slot on every call — the unbounded ref-table growth. If the Go
-				// callback returned SYNCHRONOUSLY, handleEvent has set event.result
-				// (`cb.Set("result", …)` runs only AFTER `f()` returns), so both are
-				// dead and safe to reclaim. If the callback SUSPENDED via asyncify (a
-				// blocking channel / Fetch), it never reached that line → "result" is
-				// absent → the event is still live and MUST NOT be touched.
-				if ("result" in event) {
-					go._releaseValue(event.args);
-					go._releaseValue(event);
-				}
 				return event.result;
 			};
 		}

@@ -10,7 +10,6 @@ import (
 	"github.com/andybalholm/brotli"
 	"github.com/gothicframework/core/corewasm"
 	"github.com/gothicframework/core/gothiccore"
-	"github.com/gothicframework/core/vendorjs"
 	wasmexec "github.com/gothicframework/core/wasmexec"
 )
 
@@ -23,8 +22,7 @@ func TestRegistryHasAllAssets(t *testing.T) {
 		corewasm.WASMFileName,   // gothic-core.wasm
 		corewasm.ExecFileName,   // gothic-core-exec.js
 		corewasm.BootFileName,   // gothic-core-boot.js
-		"wasm_exec.js",        // TinyGo shim
-		vendorjs.HtmxFileName, // htmx.min.js (self-hosted)
+		"wasm_exec.js",          // TinyGo shim
 	}
 	if len(All()) != len(want) {
 		t.Errorf("registry has %d assets, want %d", len(All()), len(want))
@@ -55,8 +53,7 @@ func TestAssetBytesMatchSources(t *testing.T) {
 		corewasm.WASMFileName:   {corewasm.CoreWASM(), contentTypeWASM},
 		corewasm.ExecFileName:   {corewasm.ExecJS(), contentTypeJS},
 		corewasm.BootFileName:   {corewasm.BootJS(), contentTypeJS},
-		"wasm_exec.js":        {wasmexec.Shim, contentTypeJS},
-		vendorjs.HtmxFileName: {vendorjs.HtmxJS(), contentTypeJS},
+		"wasm_exec.js":          {wasmexec.Shim, contentTypeJS},
 	}
 	for name, c := range cases {
 		a, _ := Get(name)

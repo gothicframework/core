@@ -59,10 +59,12 @@
 package main
 
 import (
-	"strings"
 	"syscall/js"
 
-	"github.com/gothicframework/core/wasm/core-runtime/awssign"
+	htmx "github.com/gothicframework/htmx-go/v2"
+	preload "github.com/gothicframework/htmx-go/v2/ext/preload"
+	sigv4 "github.com/gothicframework/htmx-go/v2/ext/sigv4"
+
 	"github.com/gothicframework/core/wasm/core-runtime/protocol"
 )
 
@@ -318,12 +320,39 @@ func main() {
 	retainedDurableFns = append(retainedDurableFns, durableRegFn)
 	doc.Call("addEventListener", evDurableRegister, durableRegFn)
 
-	// AWS request signer. Installs the htmx:configRequest body-hash
-	// signer, but ONLY when the RuntimeScripts activation shim has enabled it on
-	// this page (AWS deploy behind CloudFront OAC / SigV4). On dev / non-AWS the
-	// __gothicAmzEnabled flag is absent and this is a complete no-op — no listener,
-	// no activate call, zero overhead.
-	installAmzSigner(global, doc)
+	// Install window.htmx (the Go/WASM htmx port) plus its transformer and
+	// extension API and history/xpath init. This ONLY installs — it registers no
+	// DOM listeners against page content and performs NO document processing, so it
+	// cannot re-enter an unwinding component turn. Installing FIRST gives the
+	// extensions and transformers registered below a real window.htmx to attach to,
+	// before the DOM-processing pass in htmx.Start().
+	htmx.Install()
+
+	// Register the AWS SigV4 body-hash signer as an IN-PATH request transformer.
+	// It runs inside htmx's request pipeline (after htmx:configRequest, before
+	// xhr.send) and sets x-amz-content-sha256 on every request that carries a body,
+	// so an unsigned request is impossible by control flow (no racing listener, no
+	// boot shim). It is RUNTIME-gated: Register reads the server-rendered
+	// <meta name="gothic-provider"> marker and, off AWS (marker absent/not "AWS"),
+	// registers NOTHING — the header is absent on dev / non-AWS. Register before
+	// Start so the transformer is in place before any request is issued.
+	sigv4.Register()
+
+	// Register the preload extension (warms GET targets carrying a `preload`
+	// attribute within an hx-ext="preload" subtree). Registered before the initial
+	// DOM pass so static preload markup initialises during htmx.Start().
+	preload.Register()
+
+	// Topic ⇄ htmx bridge. Teach htmx that a `topic:<name>` trigger or hx-publish
+	// value maps onto the Topic bus's `gothic:topic:<name>` CustomEvent — which
+	// runtime/topic.go dispatches on `document` — so an element can fire on a Topic
+	// publish (hx-trigger="topic:cart") or broadcast one after a swap
+	// (hx-publish="topic:cart") with no hand-written JS. The alias mechanism is
+	// generic in htmx-go; only this line knows the Gothic `gothic:topic:` event
+	// name and that the bus dispatches on document. A `topic:<key>:<field>` value
+	// flows through unchanged to `gothic:topic:<key>:<field>` (per-field broadcasts).
+	// Registered before Start so the initial DOM pass wires any static markup.
+	htmx.RegisterTriggerAlias("topic:", "gothic:topic:", "document")
 
 	// Mark ready and announce. Ordering mirrors the topic online/ping handshake:
 	// the register and ping listeners are installed BEFORE the online announce, so
@@ -332,6 +361,15 @@ func main() {
 	// already installed synchronously above.
 	global.Set(glReady, js.ValueOf(true))
 	announceOnline(global, doc)
+
+	// Run htmx's document processing pass (processNode(body) + htmx:load). This is
+	// deliberately deferred until AFTER the core marks itself ready and announces
+	// online: htmx installs its listeners synchronously and then walks the DOM, and
+	// running that walk before the announce would let it synchronously re-enter an
+	// unwinding component turn under asyncify. "Install early, process last" keeps
+	// the ordering safe. Start is idempotent (isStarted-guarded) so a second boot
+	// on the same page cannot double-process.
+	htmx.Start()
 
 	// regFn and pingFn are retained for the page lifetime because main never
 	// returns (select {} blocks forever), keeping the scheduler and every
@@ -352,123 +390,6 @@ var retainedTopicFns []js.Func
 // callback turns, so they must be anchored where the GC can see them. Appended
 // only on the single JS event-loop goroutine (no data race).
 var retainedDurableFns []js.Func
-
-// ── AWS request signer ───────────────────────────────────────────────────────
-//
-// Gothic apps on AWS run behind CloudFront OAC (SigV4) → Lambda Function URL
-// with authorization_type = AWS_IAM. Every htmx request that carries a body must
-// send header x-amz-content-sha256 = sha256-hex(body) or CloudFront's SigV4 body
-// check rejects it with HTTP 403. This adapter hooks htmx's own configRequest
-// event, reproduces the exact urlencoded body htmx will send, hashes it (the
-// SYNCHRONOUS crypto/sha256 in the pure awssign helper), and sets the header.
-// The hashing/encoding logic is host-tested in the awssign package; this is only
-// the js.Value glue. It is INERT unless the RuntimeScripts activation shim set
-// the __gothicAmzEnabled flag (AWS only).
-
-// retainedSignerFn keeps the htmx:configRequest signer callback alive for the
-// page lifetime. main() never returns (select {} blocks forever), but the signer
-// is installed inside installAmzSigner during boot, so it is anchored here where
-// the GC can see it. Never Release'd — it must live as long as the page.
-var retainedSignerFn js.Func
-
-// installAmzSigner installs the AWS SigV4 body-hash signer, but only when the
-// activation shim (a separate RuntimeScripts phase) has flagged this page for
-// AWS by setting window.__gothicAmzEnabled. When the flag is absent this is a
-// complete no-op: no listener, no activate call. When present it installs the
-// htmx:configRequest listener FIRST, THEN calls window.__gothicAmzActivate() so
-// the shim's drained/queued requests find the signer already listening — install
-// before activate is load-bearing for that ordering.
-func installAmzSigner(global, doc js.Value) {
-	if !global.Get("__gothicAmzEnabled").Truthy() {
-		return
-	}
-
-	retainedSignerFn = js.FuncOf(func(this js.Value, args []js.Value) any {
-		if len(args) == 0 {
-			return nil
-		}
-		detail := args[0].Get("detail")
-		if !detail.Truthy() {
-			return nil
-		}
-
-		var hash string
-		switch {
-		case detail.Get("useUrlParams").Truthy():
-			// GET/DELETE etc.: htmx puts params in the URL and sends a null body,
-			// so the signed body is empty.
-			hash = awssign.EmptyBodyHash
-		default:
-			entries := collectParams(detail.Get("parameters"))
-			switch {
-			case len(entries) == 0:
-				hash = awssign.EmptyBodyHash
-			case isMultipartRequest(detail):
-				// multipart/form-data: the browser generates a random boundary we
-				// cannot reproduce, so a computed hash would never match. Use the
-				// SigV4 sentinel that tells the check to skip the body hash.
-				hash = "UNSIGNED-PAYLOAD"
-			default:
-				hash = awssign.ContentHashHex(entries)
-			}
-		}
-
-		if headers := detail.Get("headers"); headers.Truthy() {
-			headers.Set("x-amz-content-sha256", hash)
-		}
-		return nil
-	})
-
-	// Install BEFORE activate so the shim's queued requests find us listening.
-	doc.Call("addEventListener", "htmx:configRequest", retainedSignerFn)
-	global.Call("__gothicAmzActivate")
-}
-
-// collectParams lifts htmx's serialized configRequest parameter set into an
-// ordered [][2]string, preserving insertion order — the order htmx itself uses
-// to build the urlencoded body, so the hash matches byte-for-byte. htmx 2.0.3
-// exposes e.detail.parameters as a FormData-backed proxy; its forEach yields
-// (value, key, obj), so the collector reads value from args[0] and key from
-// args[1]. The collector js.Func is created for this ONE synchronous forEach and
-// Release'd the instant forEach returns (forEach is fully synchronous), so it
-// never leaks a bridge slot.
-func collectParams(params js.Value) [][2]string {
-	if !params.Truthy() {
-		return nil
-	}
-	var entries [][2]string
-	collector := js.FuncOf(func(this js.Value, args []js.Value) any {
-		if len(args) < 2 {
-			return nil
-		}
-		value := args[0].String()
-		key := args[1].String()
-		entries = append(entries, [2]string{key, value})
-		return nil
-	})
-	params.Call("forEach", collector)
-	collector.Release()
-	return entries
-}
-
-// isMultipartRequest reports whether htmx will send this request as
-// multipart/form-data (a random-boundary body we cannot reproduce). htmx sets
-// headers["Content-Type"] = "application/x-www-form-urlencoded" for a normal
-// non-GET body and leaves it UNSET for a multipart body (the browser fills in
-// the boundary). So: params present + Content-Type absent-or-not-urlencoded ⇒
-// treat as multipart and fall back to UNSIGNED-PAYLOAD. Only consulted when the
-// param set is non-empty.
-func isMultipartRequest(detail js.Value) bool {
-	headers := detail.Get("headers")
-	if !headers.Truthy() {
-		return true
-	}
-	ct := headers.Get("Content-Type")
-	if !ct.Truthy() {
-		return true
-	}
-	return !strings.HasPrefix(strings.ToLower(ct.String()), "application/x-www-form-urlencoded")
-}
 
 // stringOf coerces a js.Value to string, treating undefined/null as "".
 func stringOf(v js.Value) string {

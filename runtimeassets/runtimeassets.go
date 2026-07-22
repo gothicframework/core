@@ -12,7 +12,6 @@
 //	gothic-core-exec.js         the standard-Go wasm_exec shim matched to the core (corewasm)
 //	gothic-core-boot.js         the generated core boot loader (corewasm)
 //	wasm_exec.js                the TinyGo wasm_exec shim (wasmexec)
-//	htmx.min.js                 HTMX, self-hosted (vendorjs) — no longer a render-blocking CDN <script>
 //
 // Every asset is content-negotiated: each one's brotli and gzip variants are
 // precomputed at BUILD TIME (by `go generate`, see gen.go) and embedded, and the
@@ -28,8 +27,8 @@
 // artifact) and the per-page user WASM binaries stay under /public/wasm/.
 //
 // This is a LEAF package over the asset-owning leaf packages (gothiccore,
-// corewasm, wasmexec, vendorjs). Those packages must NOT import runtimeassets or a
-// cycle forms — runtimeassets sits one level above them.
+// corewasm, wasmexec). Those packages must NOT import runtimeassets or a cycle
+// forms — runtimeassets sits one level above them.
 package runtimeassets
 
 import (
@@ -42,7 +41,6 @@ import (
 
 	"github.com/gothicframework/core/corewasm"
 	"github.com/gothicframework/core/gothiccore"
-	"github.com/gothicframework/core/vendorjs"
 	wasmexec "github.com/gothicframework/core/wasmexec"
 )
 
@@ -113,10 +111,26 @@ func newAsset(name string, b []byte, contentType, version string) Asset {
 	}
 }
 
-// wasmExecShimHash content-hashes the TinyGo wasm_exec shim locally: unlike the
-// other assets, wasmexec exposes only the bytes (Shim), not a Version(), so we
-// compute its cache-buster here.
-var wasmExecShimHash = hash16(wasmexec.Shim)
+// wasmExecShimHash content-hashes the ACTIVE TinyGo wasm_exec shim locally:
+// unlike the other assets, wasmexec exposes only the bytes (Selected()), not a
+// Version(), so we compute its cache-buster here. Selected() returns the stock
+// variant when GOTHIC_WASM_EXEC=stock, else the manual-GC default.
+var wasmExecShimHash = hash16(wasmexec.Selected())
+
+// wasmExecAsset builds the /_gothic/wasm_exec.js asset from the ACTIVE shim
+// variant. The build-time precompressed .br/.gz variants under assets/ are
+// computed (by gen.go) for the DEFAULT (manual-GC) shim only; when the stock
+// variant is active they would not match its bytes, so we drop them and serve
+// the stock shim as identity. Correctness beats the marginal compression win on
+// this small (~18 KB) shim.
+func wasmExecAsset() Asset {
+	shim := wasmexec.Selected()
+	a := newAsset("wasm_exec.js", shim, contentTypeJS, wasmExecShimHash)
+	if wasmexec.StockSelected() {
+		a.Brotli, a.Gzip = nil, nil
+	}
+	return a
+}
 
 // registry is the name→Asset lookup. Bytes and hashes are pulled from the
 // asset-owning leaf packages so there is a single source of truth per artifact.
@@ -126,8 +140,7 @@ var registry = func() map[string]Asset {
 		newAsset(corewasm.WASMFileName, corewasm.CoreWASM(), contentTypeWASM, corewasm.CoreHash()), // gothic-core.wasm
 		newAsset(corewasm.ExecFileName, corewasm.ExecJS(), contentTypeJS, corewasm.ExecHash()),     // gothic-core-exec.js
 		newAsset(corewasm.BootFileName, corewasm.BootJS(), contentTypeJS, corewasm.Version()),      // gothic-core-boot.js
-		newAsset("wasm_exec.js", wasmexec.Shim, contentTypeJS, wasmExecShimHash),                   // TinyGo shim
-		newAsset(vendorjs.HtmxFileName, vendorjs.HtmxJS(), contentTypeJS, vendorjs.HtmxVersion()),  // htmx.min.js (self-hosted)
+		wasmExecAsset(), // TinyGo shim (manual-GC default, or stock when GOTHIC_WASM_EXEC=stock)
 	}
 	m := make(map[string]Asset, len(list))
 	for _, a := range list {

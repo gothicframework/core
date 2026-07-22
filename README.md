@@ -24,8 +24,8 @@ This module (`github.com/gothicframework/core`) is the **runtime library** a Got
 |---|---|---|
 | `config` | `github.com/gothicframework/core/config` | The `gothic.config.go` schema: `Config`, `DeployConfig`, `RuntimeConfig`, the ENV builders (`Env`/`SSMParam`/`SecretsManager`), and the deploy `Provider` enum. |
 | `router` | `github.com/gothicframework/core/router` | File-based routing, `RouteConfig[T]` / `ApiRouteConfig`, and the cache backends (in-memory / Redis / local-files) that power static caching + ISR. |
-| `wasm` | `github.com/gothicframework/core/wasm` | The client-side state runtime — `ClientSideState`, observables, topics, durable cache — compiled per-component to TinyGo WASM, plus the static full-Go core. |
-| `runtimeassets` | `github.com/gothicframework/core/runtimeassets` | Serves the framework's browser runtime (JS + WASM) from an embed under `/_gothic/*`. |
+| `wasm` | `github.com/gothicframework/core/wasm` | The client-side state runtime — `ClientSideState`, observables, topics, durable cache — compiled per-component to TinyGo WASM, plus the static full-Go core. The static core also embeds the Go/WASM htmx runtime ([`htmx-go`](https://github.com/gothicframework/htmx-go)), which installs `window.htmx` on boot, so `gothic-core.wasm` provides the page's htmx client. |
+| `runtimeassets` | `github.com/gothicframework/core/runtimeassets` | Serves the framework's browser runtime from an embed under `/_gothic/*` — the five assets `gothic-core.js`, `gothic-core.wasm`, `gothic-core-exec.js`, `gothic-core-boot.js`, and `wasm_exec.js` (precompressed brotli+gzip, content-negotiated). |
 | `render` | `github.com/gothicframework/core/render` | Templ render cache + logger used by the router. |
 | `gothiccore` · `corewasm` · `wasmexec` | `…/core/{gothiccore,corewasm,wasmexec}` | The embedded browser assets (`gothic-core.js`, the prebuilt `core.wasm`, and the TinyGo `wasm_exec.js`), each content-hash versioned for cache-busting. |
 
