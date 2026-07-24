@@ -212,11 +212,6 @@ func GetFileBytes(id string) []byte {
 		uint8Array := js.Global().Get("Uint8Array").New(arrayBuffer)
 		data := make([]byte, uint8Array.Get("length").Int())
 		js.CopyBytesToGo(data, uint8Array)
-		// Return the wrapper's bridge slot to the pool right after the copy — on
-		// TinyGo 0.41.1 (no js.Value finalizer) it would otherwise leak one slot
-		// per file read. Safe here because this runs inside the FileReader onload
-		// js.Func, so the active bridge frame is set (see __gothicReleaseBoxed).
-		releaseBoxed(uint8Array)
 		ch <- result{data: data, ok: true}
 		return nil
 	})
@@ -422,21 +417,6 @@ func prepareFetch(url string, cfg FetchConfig) (string, js.Value, js.Value, func
 // BEFORE the result is delivered. This bounds the leak: once a request settles
 // its AbortController + abort js.Func are reclaimed, so a polling/concurrent
 // instance holds at most one per IN-FLIGHT request, not one per request ever.
-// releaseBoxed force-frees v's syscall/js ref-table slot in the WASM instance
-// that is currently executing. The bundled TinyGo (0.41.1) ships syscall/js
-// WITHOUT runtime finalizers, so a js.Value that Go boxes and then drops is never
-// handed back to the bridge table — it is retained for the life of the instance
-// (which itself outlives component teardown), a permanent leak of both the slot
-// and the JS object it pins. Gothic's wasm_exec shim exposes __gothicReleaseBoxed,
-// which frees a slot in whichever instance is the active bridge frame; the shim
-// tracks that instance across every _resume, so this is only meaningful while a
-// synchronous js.Func callback is on the stack — precisely the Fetch body-reader
-// context here. Pass ONLY a value that is provably dead at the call site: freeing
-// a still-live value would leave Go holding a dangling ref.
-func releaseBoxed(v js.Value) {
-	js.Global().Call("__gothicReleaseBoxed", v)
-}
-
 func wireFetch(promise js.Value, deregister func(), deliver func(Response, error)) {
 	// settle drops the (now-dead) abort registration, then delivers. deregister
 	// is idempotent; deliver is invoked once per request across all paths.
@@ -479,14 +459,6 @@ func wireFetch(promise js.Value, deregister func(), deliver func(Response, error
 			uint8Array := js.Global().Get("Uint8Array").New(a[0])
 			data := make([]byte, uint8Array.Get("length").Int())
 			js.CopyBytesToGo(data, uint8Array)
-			// The body view is dead once its bytes are copied into data. The
-			// bundled TinyGo has no js.Value finalizers, so its ref-table slot —
-			// and the ArrayBuffer-backed buffer it pins — would otherwise be
-			// retained for the life of this WASM instance (which itself outlives
-			// teardown), leaking one Uint8Array per request. Release the slot in
-			// the running instance now, while this synchronous callback is the
-			// active bridge frame (see __gothicReleaseBoxed in wasm_exec.js).
-			releaseBoxed(uint8Array)
 			settle(Response{Status: status, Headers: headers, Body: data}, nil)
 			return nil
 		})
