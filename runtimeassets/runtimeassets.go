@@ -111,25 +111,14 @@ func newAsset(name string, b []byte, contentType, version string) Asset {
 	}
 }
 
-// wasmExecShimHash content-hashes the ACTIVE TinyGo wasm_exec shim locally:
-// unlike the other assets, wasmexec exposes only the bytes (Selected()), not a
-// Version(), so we compute its cache-buster here. Selected() returns the stock
-// variant when GOTHIC_WASM_EXEC=stock, else the manual-GC default.
+// wasmExecShimHash content-hashes the TinyGo wasm_exec shim locally: unlike the
+// other assets, wasmexec exposes only the bytes (Selected()), not a Version(),
+// so the cache-buster is computed here.
 var wasmExecShimHash = hash16(wasmexec.Selected())
 
-// wasmExecAsset builds the /_gothic/wasm_exec.js asset from the ACTIVE shim
-// variant. The build-time precompressed .br/.gz variants under assets/ are
-// computed (by gen.go) for the DEFAULT (manual-GC) shim only; when the stock
-// variant is active they would not match its bytes, so we drop them and serve
-// the stock shim as identity. Correctness beats the marginal compression win on
-// this small (~18 KB) shim.
+// wasmExecAsset builds the /_gothic/wasm_exec.js asset.
 func wasmExecAsset() Asset {
-	shim := wasmexec.Selected()
-	a := newAsset("wasm_exec.js", shim, contentTypeJS, wasmExecShimHash)
-	if wasmexec.StockSelected() {
-		a.Brotli, a.Gzip = nil, nil
-	}
-	return a
+	return newAsset("wasm_exec.js", wasmexec.Selected(), contentTypeJS, wasmExecShimHash)
 }
 
 // registry is the name→Asset lookup. Bytes and hashes are pulled from the
@@ -140,7 +129,7 @@ var registry = func() map[string]Asset {
 		newAsset(corewasm.WASMFileName, corewasm.CoreWASM(), contentTypeWASM, corewasm.CoreHash()), // gothic-core.wasm
 		newAsset(corewasm.ExecFileName, corewasm.ExecJS(), contentTypeJS, corewasm.ExecHash()),     // gothic-core-exec.js
 		newAsset(corewasm.BootFileName, corewasm.BootJS(), contentTypeJS, corewasm.Version()),      // gothic-core-boot.js
-		wasmExecAsset(), // TinyGo shim (manual-GC default, or stock when GOTHIC_WASM_EXEC=stock)
+		wasmExecAsset(), // wasm_exec.js (TinyGo shim)
 	}
 	m := make(map[string]Asset, len(list))
 	for _, a := range list {
