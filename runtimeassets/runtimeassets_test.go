@@ -69,6 +69,9 @@ func TestAssetBytesMatchSources(t *testing.T) {
 // TestHandlerServesAssetImmutable verifies a versioned request gets the bytes,
 // the right Content-Type, and the immutable cache header.
 func TestHandlerServesAssetImmutable(t *testing.T) {
+	// Pinned explicitly: the header is mode-dependent, so an ambient GOTHIC_MODE
+	// in the developer's shell would otherwise decide this test's outcome.
+	t.Setenv("GOTHIC_MODE", "")
 	h := Handler()
 	req := httptest.NewRequest(http.MethodGet, Prefix+gothiccore.FileName+"?v="+gothiccore.Version(), nil)
 	rec := httptest.NewRecorder()
@@ -134,9 +137,15 @@ func TestHandlerNegotiatesCompression(t *testing.T) {
 	}
 }
 
-// TestHandlerNoVersionNotImmutable verifies a request without ?v= is served but
-// NOT marked immutable (mirrors immutableCacheMiddleware).
-func TestHandlerNoVersionNotImmutable(t *testing.T) {
+// TestHandlerImmutableDoesNotDependOnQueryString pins that the immutable header
+// is decided by the MODE, never by seeing ?v= on the request. A CDN in front of
+// the app may strip the query string before the origin (CloudFront's managed
+// CachingOptimized policy does), and gating on it there means the header is never
+// sent and every visit re-downloads the whole runtime. Safety comes from the URL
+// the framework EMITS always carrying ?v=<content hash>, so a new build is a new
+// URL — not from the origin observing that parameter.
+func TestHandlerImmutableDoesNotDependOnQueryString(t *testing.T) {
+	t.Setenv("GOTHIC_MODE", "")
 	h := Handler()
 	req := httptest.NewRequest(http.MethodGet, Prefix+corewasm.WASMFileName, nil)
 	rec := httptest.NewRecorder()
@@ -148,8 +157,26 @@ func TestHandlerNoVersionNotImmutable(t *testing.T) {
 	if ct := rec.Header().Get("Content-Type"); ct != contentTypeWASM {
 		t.Errorf("Content-Type %q, want %q", ct, contentTypeWASM)
 	}
+	if cc := rec.Header().Get("Cache-Control"); cc != "public, max-age=31536000, immutable" {
+		t.Errorf("Cache-Control %q, want immutable even without ?v=", cc)
+	}
+}
+
+// TestHandlerNotImmutableInDev pins the other half: in dev a rebuild replaces
+// these assets under the SAME name, so an immutable copy in the browser would
+// keep booting the old runtime. Dev must send no cache header at all.
+func TestHandlerNotImmutableInDev(t *testing.T) {
+	t.Setenv("GOTHIC_MODE", "dev")
+	h := Handler()
+	req := httptest.NewRequest(http.MethodGet, Prefix+corewasm.WASMFileName+"?v=deadbeef", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d, want 200", rec.Code)
+	}
 	if cc := rec.Header().Get("Cache-Control"); cc != "" {
-		t.Errorf("Cache-Control should be empty without ?v=, got %q", cc)
+		t.Errorf("Cache-Control should be empty in dev, got %q", cc)
 	}
 }
 

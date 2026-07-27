@@ -36,6 +36,7 @@ import (
 	"embed"
 	"encoding/hex"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 
@@ -43,6 +44,11 @@ import (
 	"github.com/gothicframework/core/gothiccore"
 	wasmexec "github.com/gothicframework/core/wasmexec"
 )
+
+// isDev reports whether the app runs in development mode, where these assets
+// must never be cached: a rebuild replaces them under the SAME name, so a
+// browser holding an immutable copy would keep booting the old runtime.
+func isDev() bool { return os.Getenv("GOTHIC_MODE") == "dev" }
 
 // Prefix is the route namespace the framework serves its runtime assets under.
 // It is deliberately distinct from /public/ so it never collides with a user's
@@ -229,10 +235,17 @@ func Handler() http.Handler {
 		// Response varies by Accept-Encoding (we serve br/gzip/identity of the
 		// same URL), so caches must key on it.
 		h.Set("Vary", "Accept-Encoding")
-		// A ?v=<hash> cache-buster means the URL is content-addressed: cache it
-		// immutably for a year. A framework upgrade changes the hash (hence the
-		// URL), so the cache is busted automatically.
-		if r.URL.Query().Get("v") != "" {
+		// Outside dev these assets are immutable for a year. Every URL the
+		// framework emits carries a ?v=<content hash>, so a framework upgrade
+		// produces a NEW url and the browser fetches it — the old entry is simply
+		// never requested again. Nothing needs invalidating, which matters because
+		// a CDN invalidation reaches the edge but never a browser.
+		//
+		// The header does NOT depend on seeing ?v= on the request: a CDN may drop
+		// the query string before the origin (CloudFront's managed CachingOptimized
+		// policy does exactly that), and gating on it there means the header is
+		// never sent and every visit re-downloads the whole runtime.
+		if !isDev() {
 			h.Set("Cache-Control", "public, max-age=31536000, immutable")
 		}
 
