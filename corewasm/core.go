@@ -1,16 +1,15 @@
-// Package corewasm owns the Gothic Framework full-Go STATIC CORE artifact:
-// the prebuilt, type-agnostic RPC/registration hub compiled with the
-// standard Go toolchain (GOOS=js GOARCH=wasm) so it has the full standard library
-// TinyGo lacks. See pkg/wasm/core-runtime for the core's source and the rationale
-// for full-Go + static.
+// Package corewasm owns the Gothic Framework STATIC CORE artifact: the prebuilt,
+// type-agnostic RPC/registration hub compiled with the framework's pinned TinyGo
+// fork. See wasm/core-runtime for the core's source and the rationale for a
+// single static hub shared by every component on the page.
 //
-// This package is the emission + versioning seam, mirroring pkg/helpers/gothiccore
+// This package is the emission + versioning seam, mirroring gothiccore
 // (which owns gothic-core.js). It embeds three artifacts and emits them to the
 // project's public/ directory:
 //
 //	gothic-core.wasm       the prebuilt core module (from core.wasm, committed)
-//	gothic-core-exec.js    the standard-Go wasm_exec shim, VERSION-MATCHED to the
-//	                       Go toolchain that built core.wasm (committed)
+//	gothic-core-exec.js    the wasm_exec shim the core instantiates through — the
+//	                       same TinyGo shim per-instance components use (committed)
 //	gothic-core-boot.js    a tiny loader that instantiates + runs the core once
 //	                       per page, generated here so its content-hash tracks the
 //	                       core and exec hashes
@@ -22,17 +21,29 @@
 // # Regenerating the core artifacts (maintainers only)
 //
 // The committed core.wasm + gothic-core-exec.js are rebuilt ONLY when the core's
-// source (wasm/core-runtime) or the pinned Go toolchain changes. Run:
+// source (wasm/core-runtime), one of its dependencies, or the pinned TinyGo
+// version changes. Run:
 //
 //	go generate ./corewasm
 //
-// which runs the two directives below (build the wasm, copy the matching
-// wasm_exec.js). Commit the regenerated files. End users NEVER rebuild these —
-// the CLI ships them prebuilt and only COPIES them into public/.
+// The build needs the framework's pinned TinyGo fork on PATH as `tinygo`; set
+// GOTHIC_TINYGO to point at a specific binary instead (the CLI caches one under
+// ~/.cache/gothic-cli/tinygo/tinygo-<version>/<platform>/tinygo/bin/tinygo). The
+// pinned version is the one cli/internal/build.tinyGoVersion names — building
+// with a different one produces a different binary and therefore a different
+// cache-buster.
+//
+// The flags match what the CLI compiles per-instance components with, and they
+// make the output byte-reproducible: two runs of the same source with the same
+// toolchain emit an identical core.wasm. Everything downstream depends on that,
+// because the ?v= cache-buster is a content hash of these bytes.
+//
+// Commit the regenerated files. End users NEVER rebuild these — the CLI ships
+// them prebuilt and only COPIES them into public/.
 package corewasm
 
-//go:generate sh -c "GOOS=js GOARCH=wasm go build -trimpath -ldflags=\"-s -w\" -o core.wasm github.com/gothicframework/core/wasm/core-runtime"
-//go:generate sh -c "cp \"$(go env GOROOT)/lib/wasm/wasm_exec.js\" gothic-core-exec.js"
+//go:generate sh -c "${DOLLAR}{GOTHIC_TINYGO:-tinygo} build -no-debug -opt=z -target wasm -gc precise -o core.wasm github.com/gothicframework/core/wasm/core-runtime"
+//go:generate sh -c "cp ../wasmexec/wasm_exec_stock.js gothic-core-exec.js"
 
 import (
 	"bytes"
@@ -50,11 +61,11 @@ import (
 //go:embed core.wasm
 var coreWASM []byte
 
-// execJS is the standard-Go wasm_exec shim, version-matched to the toolchain
-// that built core.wasm (regenerated alongside it). Emitted as
+// execJS is the wasm_exec shim the core instantiates through, version-matched to
+// the toolchain that built core.wasm (regenerated alongside it). Emitted as
 // public/gothic-core-exec.js. It is loaded under its OWN __gothicGoClasses slot
-// so its standard-Go `Go` constructor never collides with the TinyGo one used by
-// per-instance components.
+// so the core's `Go` instance stays independent of the one per-instance
+// components boot from.
 //
 //go:embed gothic-core-exec.js
 var execJS []byte
