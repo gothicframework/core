@@ -83,11 +83,16 @@ var execHash = hash16(execJS)
 // version-matched exec shim into its own __gothicGoClasses slot (coexisting with
 // TinyGo components), then instantiates and runs the core exactly once per page.
 //
-// It fetches the wasm as an ArrayBuffer and uses WebAssembly.instantiate (rather
-// than instantiateStreaming) so a static host that mis-serves the .wasm
-// Content-Type cannot break the boot. The core.wasm + exec URLs carry their own
-// content hashes, so this loader's OWN content — and therefore its hash — changes
-// whenever either binary changes.
+// The wasm download + compile start immediately and run CONCURRENTLY with the exec
+// shim's own download, because compiling needs no import object — only the final
+// instantiate depends on the shim. Chaining them instead costs a full extra round
+// trip before the core can come online.
+//
+// It fetches the wasm as an ArrayBuffer and uses WebAssembly.compile (rather than
+// compileStreaming) so a static host that mis-serves the .wasm Content-Type cannot
+// break the boot. The core.wasm + exec URLs carry their own content hashes, so this
+// loader's OWN content — and therefore its hash — changes whenever either binary
+// changes.
 var bootJS = "// gothic-core-boot.js — boots the Gothic full-Go static core once per page.\n" +
 	"// Loaded once from the layout <head>. Instantiates public/gothic-core.wasm through\n" +
 	"// its own wasm_exec slot so the standard-Go `Go` constructor coexists with TinyGo\n" +
@@ -100,14 +105,21 @@ var bootJS = "// gothic-core-boot.js — boots the Gothic full-Go static core on
 	"    var EXEC='/_gothic/" + ExecFileName + "?v=" + execHash + "';\n" +
 	"    var CORE='/_gothic/" + WASMFileName + "?v=" + coreHash + "';\n" +
 	"    var SLOT='" + ExecFileName + "';\n" +
+	"    // Download and compile the module NOW, in parallel with the exec shim below,\n" +
+	"    // so the two round trips overlap instead of chaining. Compilation needs no\n" +
+	"    // import object, so only the final instantiate has to wait for the shim.\n" +
+	"    var modP=fetch(CORE).then(function(resp){return resp.arrayBuffer();})\n" +
+	"        .then(function(buf){return WebAssembly.compile(buf);});\n" +
+	"    // The real failure path lives in boot(); this only keeps a rejection that\n" +
+	"    // lands before boot() attaches from surfacing as an unhandled rejection.\n" +
+	"    modP.catch(function(){});\n" +
 	"    function boot(){\n" +
 	"        if(!window.__gothicGoClasses)window.__gothicGoClasses={};\n" +
 	"        var GoCls=window.__gothicGoClasses[SLOT];\n" +
 	"        if(!GoCls){window.__gothicCoreBooting=0;try{console.error('gothic: core exec class missing');}catch(_){}return;}\n" +
 	"        var go=new GoCls();\n" +
-	"        fetch(CORE).then(function(resp){return resp.arrayBuffer();})\n" +
-	"            .then(function(buf){return WebAssembly.instantiate(buf,go.importObject);})\n" +
-	"            .then(function(res){go.run(res.instance);})\n" +
+	"        modP.then(function(mod){return WebAssembly.instantiate(mod,go.importObject);})\n" +
+	"            .then(function(inst){go.run(inst);})\n" +
 	"            .catch(function(e){window.__gothicCoreBooting=0;try{console.error('gothic: core boot failed',e);}catch(_){}});\n" +
 	"    }\n" +
 	"    if(window.__gothicGoClasses&&window.__gothicGoClasses[SLOT]){boot();return;}\n" +
@@ -155,6 +167,13 @@ func ExecHash() string { return execHash }
 // cache-buster: /_gothic/gothic-core-boot.js?v=<bootHash>. Served from the
 // framework embed via the /_gothic/ route (no longer copied into public/).
 func BootAssetPath() string { return "/_gothic/" + BootFileName + "?v=" + bootHash }
+
+// WASMAssetPath is the core module URL, byte-identical to the one the boot loader
+// fetches. The layout preloads it so the download starts while the HTML is still
+// parsing instead of waiting for the boot loader itself to arrive; a preload whose
+// URL diverged from the loader's would download the module twice, so both are
+// built from the same coreHash.
+func WASMAssetPath() string { return "/_gothic/" + WASMFileName + "?v=" + coreHash }
 
 // writeIfChanged writes data to path only when the file is absent or its current
 // content differs. This keeps the file's MODIFICATION TIME STABLE across repeated

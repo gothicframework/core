@@ -353,7 +353,7 @@ var errAborted = errors.New("gothic: fetch aborted")
 // the returned deregister func drops the abort hook once the request settles so
 // a repeatedly-fetching instance does not accumulate a js.Func + AbortController
 // per request (called exactly once from wireFetch's settle path).
-func prepareFetch(url string, cfg FetchConfig) (string, js.Value, js.Value, func()) {
+func prepareFetch(url string, cfg FetchConfig) (string, js.Value, js.Value, fetchLifetime) {
 	if cfg.Method == "" {
 		cfg.Method = "GET"
 	}
@@ -395,9 +395,30 @@ func prepareFetch(url string, cfg FetchConfig) (string, js.Value, js.Value, func
 	// component's teardown so an in-flight request is cancelled on unmount.
 	ac := js.Global().Get("AbortController").New()
 	init.Set("signal", ac.Get("signal"))
-	deregister := OnUnmount(func() { ac.Call("abort") })
 
-	return url, init, ac, deregister
+	// torndown lets wireFetch drop a settlement that lands after teardown: the abort below rejects the promise on a LATER turn, when the scope is already gone.
+	torndown := new(bool)
+	dropAbort := OnUnmount(func() {
+		*torndown = true
+		ac.Call("abort")
+	})
+
+	return url, init, ac, fetchLifetime{torndown: torndown, dropAbort: dropAbort}
+}
+
+// fetchLifetime tells wireFetch whether the request outlived its component, and how to drop the abort hook once it settles.
+type fetchLifetime struct {
+	torndown  *bool
+	dropAbort func()
+}
+
+// The nil guards keep a zero-value lifetime from killing the instance: a nil deref is fatal on wasm32, with no recover.
+func (l fetchLifetime) dead() bool { return l.torndown != nil && *l.torndown }
+
+func (l fetchLifetime) release() {
+	if l.dropAbort != nil {
+		l.dropAbort()
+	}
 }
 
 // wireFetch attaches then/catch (plus the nested arrayBuffer then/catch) to a
@@ -417,11 +438,16 @@ func prepareFetch(url string, cfg FetchConfig) (string, js.Value, js.Value, func
 // BEFORE the result is delivered. This bounds the leak: once a request settles
 // its AbortController + abort js.Func are reclaimed, so a polling/concurrent
 // instance holds at most one per IN-FLIGHT request, not one per request ever.
-func wireFetch(promise js.Value, deregister func(), deliver func(Response, error)) {
+func wireFetch(promise js.Value, life fetchLifetime, deliver func(Response, error)) {
 	// settle drops the (now-dead) abort registration, then delivers. deregister
 	// is idempotent; deliver is invoked once per request across all paths.
+	//
+	// A settlement arriving after teardown is dropped: it is that teardown's own abort coming back, and delivering it would run a user callback in a dead scope.
 	settle := func(resp Response, err error) {
-		deregister()
+		if life.dead() {
+			return
+		}
+		life.release()
 		deliver(resp, err)
 	}
 
@@ -429,6 +455,10 @@ func wireFetch(promise js.Value, deregister func(), deliver func(Response, error
 	thenFn = js.FuncOf(func(this js.Value, args []js.Value) interface{} {
 		thenFn.Release()
 		catchFn.Release()
+		// Nothing downstream would be read, so skip reading the body too.
+		if life.dead() {
+			return nil
+		}
 		resp := args[0]
 
 		// Capture status and headers synchronously off the Response object
@@ -456,6 +486,9 @@ func wireFetch(promise js.Value, deregister func(), deliver func(Response, error
 		bufThen = js.FuncOf(func(_ js.Value, a []js.Value) interface{} {
 			bufThen.Release()
 			bufCatch.Release()
+			if life.dead() {
+				return nil
+			}
 			uint8Array := js.Global().Get("Uint8Array").New(a[0])
 			data := make([]byte, uint8Array.Get("length").Int())
 			js.CopyBytesToGo(data, uint8Array)
@@ -468,7 +501,8 @@ func wireFetch(promise js.Value, deregister func(), deliver func(Response, error
 			settle(Response{}, errors.New(a[0].String()))
 			return nil
 		})
-		resp.Call("arrayBuffer").Call("then", bufThen).Call("catch", bufCatch)
+		// then(f, c), never .then(f).catch(c): chained, the reject handler sits on the promise then RETURNS, so a throw inside bufThen would invoke the bufCatch it just Released.
+		resp.Call("arrayBuffer").Call("then", bufThen, bufCatch)
 		return nil
 	})
 	catchFn = js.FuncOf(func(this js.Value, args []js.Value) interface{} {
@@ -478,7 +512,8 @@ func wireFetch(promise js.Value, deregister func(), deliver func(Response, error
 		return nil
 	})
 
-	promise.Call("then", thenFn).Call("catch", catchFn)
+	// Both handlers on the same promise, as above, so exactly one runs and the mutual Release is safe.
+	promise.Call("then", thenFn, catchFn)
 }
 
 // Fetch makes an HTTP request using the browser's fetch API and blocks until
@@ -495,10 +530,10 @@ func Fetch(url string, config ...FetchConfig) (Response, error) {
 		cfg = config[0]
 	}
 
-	url, init, ac, dereg := prepareFetch(url, cfg)
+	url, init, ac, life := prepareFetch(url, cfg)
 
 	ch := make(chan FetchResult, 1)
-	wireFetch(js.Global().Call("fetch", url, init), dereg, func(resp Response, err error) {
+	wireFetch(js.Global().Call("fetch", url, init), life, func(resp Response, err error) {
 		ch <- FetchResult{Response: resp, Err: err}
 	})
 
@@ -520,8 +555,8 @@ func Fetch(url string, config ...FetchConfig) (Response, error) {
 // request is aborted on component teardown via a per-scope AbortController.
 func FetchAsync(url string, cfg FetchConfig, done func(Response, error)) {
 	sc := CaptureScope()
-	url, init, _, dereg := prepareFetch(url, cfg)
-	wireFetch(js.Global().Call("fetch", url, init), dereg, func(resp Response, err error) {
+	url, init, _, life := prepareFetch(url, cfg)
+	wireFetch(js.Global().Call("fetch", url, init), life, func(resp Response, err error) {
 		runInScope(sc, func() { done(resp, err) })
 	})
 }
@@ -536,9 +571,9 @@ func FetchChan(url string, cfg ...FetchConfig) <-chan FetchResult {
 	if len(cfg) > 0 {
 		c = cfg[0]
 	}
-	url, init, _, dereg := prepareFetch(url, c)
+	url, init, _, life := prepareFetch(url, c)
 	ch := make(chan FetchResult, 1)
-	wireFetch(js.Global().Call("fetch", url, init), dereg, func(resp Response, err error) {
+	wireFetch(js.Global().Call("fetch", url, init), life, func(resp Response, err error) {
 		ch <- FetchResult{Response: resp, Err: err}
 	})
 	return ch

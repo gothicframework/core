@@ -361,32 +361,45 @@ var hxRegs []*hxReg
 
 // release detaches the listener (htmx.off) and releases its js.Func, once.
 //
-// The off() call is wrapped in a recover: on the normal teardown path the scope
-// root [data-gothic-scope="X"] has ALREADY been removed from the DOM (the
-// MutationObserver fires __gothicTeardown on removedNodes), so htmx.off →
-// document.querySelector(sel) → null → null.removeEventListener throws a JS
-// TypeError, which surfaces as a Go panic. That is harmless — the browser
-// already dropped the detached element's listeners — but it must not (a) skip the
-// Release below (the js.Func's _values bridge slot is otherwise leaked, one per
-// On per mount → monotonic growth on a repeatedly-swapped component) nor (b)
-// escape this js.Func and trap the TinyGo instance mid-teardown. So we swallow
-// the off() throw and ALWAYS Release. For the Off()-while-mounted path the root
-// still exists, off() succeeds, and Release runs exactly once (released guard).
+// The off() call is skipped when its target no longer exists: on the normal
+// teardown path the scope root [data-gothic-scope="X"] has ALREADY been removed
+// from the DOM (the MutationObserver fires __gothicTeardown on removedNodes), so
+// htmx.off → document.querySelector(sel) → null → null.removeEventListener throws
+// a JS TypeError, which surfaces as a Go panic and traps the instance
+// mid-teardown (there is no recover on wasm32 to swallow it). Skipping is
+// correct, not merely safe: the browser dropped the detached element's listeners
+// already. What must NEVER be skipped is the Release below — the js.Func's
+// _values bridge slot is otherwise leaked, one per On per mount, i.e. monotonic
+// growth on a repeatedly-swapped component. For the Off()-while-mounted path the
+// root still exists, off() runs, and Release runs exactly once (released guard).
 func (r *hxReg) release(hx js.Value) {
 	if r.released {
 		return
 	}
 	r.released = true
-	// Only detach a listener we actually attached. A deferred registration whose
-	// core never came online (or that tore down before it did) is unbound — there
-	// is nothing to htmx.off, and hx may even be undefined here.
-	if r.bound && !hx.IsUndefined() {
-		func() {
-			defer func() { _ = recover() }()
-			hxOnOff(hx, "off", r.sel, r.event, r.f)
-		}()
+	// Only detach a listener we actually attached, through an htmx that is present
+	// and still exposes off. A deferred registration whose core never came online
+	// (or that tore down before it did) is unbound — there is nothing to htmx.off,
+	// and hx may even be undefined here.
+	if r.bound && !hx.IsUndefined() && isJSFunc(hx.Get("off")) && offTargetExists(r.sel) {
+		hxOnOff(hx, "off", r.sel, r.event, r.f)
 	}
 	r.f.Release() // always — the only GC path for the listener js.Func
+}
+
+// isJSFunc reports whether v is a callable JS value.
+func isJSFunc(v js.Value) bool { return v.Type() == js.TypeFunction }
+
+// offTargetExists reports whether htmx.off's target for sel is still resolvable.
+// An empty sel means the document-wide binding (htmx resolves it to document.body),
+// which outlives every component. A non-empty sel is a selector scopeSelector already
+// resolved once at registration, so it is syntactically valid and querySelector on it
+// cannot throw — it just returns null once the scope root has been swapped away.
+func offTargetExists(sel string) bool {
+	if sel == "" {
+		return true
+	}
+	return doc().Call("querySelector", sel).Truthy()
 }
 
 // bind performs the deferred htmx.on exactly once, and only while the

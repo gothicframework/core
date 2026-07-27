@@ -387,7 +387,10 @@ func OnUnmount(fn func()) func() {
 			return
 		}
 		deregistered = true
-		unmounts.SetIndex(idx, js.Null())
+		// A deregistration can land after teardown, when this array is already gone; the slot no longer matters since nothing will read it again.
+		if unmounts.Truthy() {
+			unmounts.SetIndex(idx, js.Null())
+		}
 		f.Release()
 	}
 }

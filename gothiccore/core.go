@@ -124,6 +124,21 @@ const JS = `// gothic-core.js — shared idempotent Gothic WASM runtime.
             queueMicrotask(function(){document.dispatchEvent(e);});
         };
     }
+    // __htmxTryCall(target,method,...args): run target[method](...args) inside a JS
+    // try/catch and return the outcome as data — {ok:true,v:result} or {ok:false,e:msg}.
+    // A JS exception raised by a Go/WASM syscall surfaces as a Go panic, and recover()
+    // does not exist on wasm32, so an unguarded throw from third-party JS (a custom htmx
+    // extension, a user event-filter expression, a builtin rejecting its input) would
+    // trap the whole instance. Reflect.get and Reflect.construct route a throwing
+    // property read or constructor through this same primitive.
+    if(!window.__htmxTryCall){
+        window.__htmxTryCall=function(target,method){
+            try{
+                var args=Array.prototype.slice.call(arguments,2);
+                return {ok:true,v:target[method].apply(target,args)};
+            }catch(e){return {ok:false,e:String(e)};}
+        };
+    }
     if(!window.__gothicFindScope){
         window.__gothicFindScope=function(){
             var e=window.event;
