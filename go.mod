@@ -6,7 +6,7 @@ require (
 	github.com/a-h/templ v0.3.1020
 	github.com/andybalholm/brotli v1.1.0
 	github.com/go-chi/chi/v5 v5.2.5
-	github.com/gothicframework/htmx-go/v2 v2.0.9-beta.1
+	github.com/gothicframework/htmx-go/v2 v2.0.9-beta.2
 	github.com/redis/go-redis/v9 v9.18.0
 	github.com/tdewolff/minify/v2 v2.24.13
 )
