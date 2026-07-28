@@ -1,6 +1,44 @@
 package runtime
 
-import "github.com/gothicframework/htmx-go/v2/ext/sigv4"
+// # Why the hash is computed by the BROWSER, not by this package
+//
+// The body hash is produced with window.crypto.subtle.digest, not Go's
+// crypto/sha256, and that choice is about payload size.
+//
+// This file compiles into the runtime that the CLI extracts into EVERY page and
+// EVERY stateful component binary — 38 of them in the reference app alone. Linking
+// a Go SHA-256 here therefore costs its bytes once per unit, whether or not that
+// unit ever calls Fetch. Measured on the reference app, brotli (what travels):
+//
+//	crypto/sha256 imported directly ....... +37 KB per unit  (~1.4 MB total)
+//	via the sigv4 package ................. +70 KB per unit  (~2.7 MB total)
+//	window.crypto.subtle .................. 0
+//
+// The pages that grew included ones with no Fetch call at all, so tree-shaking
+// does not rescue it. Paying a megabyte across the app to sign the small subset of
+// requests that need it is the wrong trade, especially right after shrinking the
+// static core from 797 KB to 246 KB.
+//
+// Two alternatives were rejected:
+//
+//   - Bridging to the static core, which already links sha256 for the htmx signer.
+//     Free in bytes, but it routes every signed request through the ONE shared core
+//     instance: two extra copies of the body across the WASM boundary, and a
+//     synchronous re-entry into an instance that may be mid-task — the asyncify
+//     re-entrancy hazard this project has already paid for once.
+//   - A hand-written SHA-256 in gothic-core.js. Synchronous and small, but it would
+//     make the framework own a crypto implementation for no gain over the one every
+//     browser already ships.
+//
+// subtle.digest is async, which is why signing threads through a callback below
+// rather than returning a value. That asynchrony is confined to the AWS path: when
+// the provider marker is absent — every non-AWS app, and every local dev run —
+// signing is skipped and the Fetch path is byte-identical to what it was before.
+//
+// Availability is not a practical concern: crypto.subtle requires a secure context,
+// signing only happens when the provider is AWS (always https), and http://localhost
+// is a secure context by specification. Verified returning the correct digest on
+// Chromium, Firefox and WebKit.
 
 // fetchsign.go holds the PURE decision logic for signing a Fetch body on AWS.
 // It carries NO build tag and no syscall/js dependency, so it compiles and is
@@ -40,28 +78,41 @@ func shouldSignFetch(providerIsAWS, sameOrigin bool) bool {
 	return providerIsAWS && sameOrigin
 }
 
-// fetchBodyHash returns the x-amz-content-sha256 value for a Fetch body.
+// fetchBodyBytes returns the exact payload that will be handed to fetch(), which
+// is what must be hashed. Only one of body/bodyBytes is ever populated
+// (prepareFetch prefers the string). Returning nil means "no body".
 //
-// Only one of body/bodyBytes is ever populated (prepareFetch prefers the string).
-// An absent body hashes to the empty-body constant rather than being skipped: the
-// htmx signer sets the header on bodyless GET/DELETE too, and matching it keeps a
-// single observable contract across both paths.
-//
-// There is no multipart escape hatch here, unlike the htmx signer. That sentinel
-// exists because the BROWSER builds a multipart body with a random boundary the
-// signer cannot reproduce; a caller who assembles multipart bytes by hand and
-// passes them as BodyBytes has already given us the exact payload, so it hashes
-// like any other body.
-func fetchBodyHash(body string, bodyBytes []byte) string {
+// This is where Fetch is structurally safer than the htmx signer: that one has to
+// REPRODUCE the body htmx will serialize, byte for byte, including JavaScript's
+// encodeURIComponent semantics, and one wrong byte is a 403. Here the bytes hashed
+// are the same values passed to fetch() a few lines later.
+func fetchBodyBytes(body string, bodyBytes []byte) []byte {
 	switch {
 	case body != "":
-		return sigv4.Sha256Hex(body)
+		return []byte(body)
 	case len(bodyBytes) > 0:
-		return sigv4.Sha256Hex(string(bodyBytes))
+		return bodyBytes
 	default:
-		return sigv4.EmptyBodyHash
+		return nil
 	}
 }
+
+// These two mirror sigv4.EmptyBodyHash and sigv4.ContentSha256Header and are
+// deliberately NOT imported from there.
+//
+// Importing that package for two constants linked its whole contents into every
+// page and component binary: +70 KB brotli each, ~2.7 MB across the reference app,
+// even after the hashing itself had moved to the browser. TinyGo links at package
+// granularity, so there is no way to reference one constant cheaply. Copying two
+// literals is the entire cost of avoiding that.
+//
+// fetchsign_test.go asserts both stay equal to the sigv4 originals. That import is
+// test-only, so it never reaches a shipped binary while still failing the build if
+// the values ever diverge.
+const (
+	emptyBodyHash       = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+	contentSha256Header = "x-amz-content-sha256"
+)
 
 // sameOriginURL reports whether target resolves to pageOrigin.
 //

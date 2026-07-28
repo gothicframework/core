@@ -27,24 +27,33 @@ func TestShouldSignFetch(t *testing.T) {
 	}
 }
 
-func TestFetchBodyHashMatchesTheBytesSent(t *testing.T) {
-	// The whole point of signing at this layer: the hash covers exactly the value
-	// handed to fetch(), so it cannot drift from the wire the way a reconstructed
-	// urlencoded body can.
+func TestFetchBodyBytesAreExactlyWhatIsSent(t *testing.T) {
+	// The whole point of signing at this layer: what gets hashed is exactly the
+	// value handed to fetch(), so it cannot drift from the wire the way a
+	// reconstructed urlencoded body can.
 	const jsonBody = `{"message":"round trip","count":99}`
 
-	if got, want := fetchBodyHash(jsonBody, nil), sigv4.Sha256Hex(jsonBody); got != want {
-		t.Errorf("string body hash = %q, want %q", got, want)
+	if got := string(fetchBodyBytes(jsonBody, nil)); got != jsonBody {
+		t.Errorf("string body = %q, want %q", got, jsonBody)
 	}
-	if got, want := fetchBodyHash("", []byte(jsonBody)), sigv4.Sha256Hex(jsonBody); got != want {
-		t.Errorf("byte body hash = %q, want %q", got, want)
+	if got := string(fetchBodyBytes("", []byte(jsonBody))); got != jsonBody {
+		t.Errorf("byte body = %q, want %q", got, jsonBody)
 	}
-	if got := fetchBodyHash("", nil); got != sigv4.EmptyBodyHash {
-		t.Errorf("empty body hash = %q, want the empty-body constant", got)
+	if got := fetchBodyBytes("", nil); got != nil {
+		t.Errorf("absent body = %v, want nil so the empty-body hash is used", got)
 	}
-	// A string body and the identical bytes must agree — callers may use either.
-	if fetchBodyHash(jsonBody, nil) != fetchBodyHash("", []byte(jsonBody)) {
-		t.Error("string and []byte forms of the same body must hash identically")
+	// Callers may supply either form; both must yield the identical payload.
+	if string(fetchBodyBytes(jsonBody, nil)) != string(fetchBodyBytes("", []byte(jsonBody))) {
+		t.Error("string and []byte forms of the same body must produce identical bytes")
+	}
+}
+
+// TestEmptyBodyHashIsTheRealDigestOfNothing guards the constant the bodyless path
+// sends. It is hardcoded rather than computed, so a typo would be invisible until
+// CloudFront rejected every GET.
+func TestEmptyBodyHashIsTheRealDigestOfNothing(t *testing.T) {
+	if got := sigv4.Sha256Hex(""); got != emptyBodyHash {
+		t.Errorf("emptyBodyHash = %q, but sha256(\"\") = %q", emptyBodyHash, got)
 	}
 }
 
@@ -97,5 +106,18 @@ func TestSameOriginURLFailsClosedWithoutOrigin(t *testing.T) {
 	// A relative URL still targets this page whatever its origin string is.
 	if !sameOriginURL("/api/x", "") {
 		t.Error("a relative URL always targets this page")
+	}
+}
+
+// TestConstantsMatchTheSigv4Originals is why the two literals in fetchsign.go are
+// safe to copy. The import lives here, in a test, so it never reaches a shipped
+// binary — but the build still fails the moment the values diverge from the
+// package the htmx signer uses.
+func TestConstantsMatchTheSigv4Originals(t *testing.T) {
+	if emptyBodyHash != sigv4.EmptyBodyHash {
+		t.Errorf("emptyBodyHash = %q, sigv4 says %q", emptyBodyHash, sigv4.EmptyBodyHash)
+	}
+	if contentSha256Header != sigv4.ContentSha256Header {
+		t.Errorf("contentSha256Header = %q, sigv4 says %q", contentSha256Header, sigv4.ContentSha256Header)
 	}
 }

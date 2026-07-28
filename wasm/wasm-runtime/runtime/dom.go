@@ -9,9 +9,103 @@ import (
 	"strings"
 	"syscall/js"
 	"unsafe"
-
-	"github.com/gothicframework/htmx-go/v2/ext/sigv4"
 )
+
+// withBodyHash resolves the AWS body-hash header for a Fetch, then calls next.
+//
+// It calls next SYNCHRONOUSLY when no signature is needed — which is every non-AWS
+// app and every local dev run — so the common path keeps the exact shape it had
+// before signing existed. Only on AWS does it go through a promise.
+//
+// The hash comes from window.crypto.subtle.digest rather than Go's crypto/sha256:
+// this code is compiled into every page and component binary, and linking a Go
+// SHA-256 here cost +37 KB brotli in each one. See fetchsign.go for the numbers and
+// the alternatives that were rejected.
+//
+// A failure to hash calls next WITHOUT the header rather than aborting: the request
+// then gets a clean 403 from CloudFront, which is visible and traceable, instead of
+// vanishing inside the runtime. The reason is logged.
+func withBodyHash(url string, cfg *FetchConfig, next func()) {
+	if !shouldSignFetch(providerIsAWS(), sameOriginURL(url, pageOrigin())) {
+		next()
+		return
+	}
+	// A caller-supplied header wins: they may be reproducing a payload we cannot
+	// see, and silently overwriting it would be worse than trusting it.
+	if _, ok := cfg.Headers[contentSha256Header]; ok {
+		next()
+		return
+	}
+
+	body := fetchBodyBytes(cfg.Body, cfg.BodyBytes)
+	if len(body) == 0 {
+		setFetchHeader(cfg, contentSha256Header, emptyBodyHash)
+		next()
+		return
+	}
+
+	subtle := js.Global().Get("crypto")
+	if subtle.Truthy() {
+		subtle = subtle.Get("subtle")
+	}
+	if !subtle.Truthy() {
+		ConsoleLog("gothic: crypto.subtle unavailable, sending", url, "unsigned")
+		next()
+		return
+	}
+
+	buf := js.Global().Get("Uint8Array").New(len(body))
+	js.CopyBytesToJS(buf, body)
+
+	// next ends up calling prepareFetch, which registers an OnUnmount for the
+	// per-scope abort. Running that from a promise callback would attach it to
+	// whatever scope happens to be active by then, so the caller's scope is
+	// captured here and re-established around the continuation — the same
+	// discipline FetchAsync uses for its done callback.
+	sc := CaptureScope()
+
+	var onOK, onErr js.Func
+	release := func() { onOK.Release(); onErr.Release() }
+	onOK = js.FuncOf(func(this js.Value, args []js.Value) any {
+		defer release()
+		if len(args) > 0 {
+			setFetchHeader(cfg, contentSha256Header, hexOfDigest(args[0]))
+		}
+		runInScope(sc, next)
+		return nil
+	})
+	onErr = js.FuncOf(func(this js.Value, args []js.Value) any {
+		defer release()
+		ConsoleLog("gothic: hashing the body of", url, "failed, sending unsigned")
+		runInScope(sc, next)
+		return nil
+	})
+	// then(f, c), never .then(f).catch(c): chained, a throw inside f would invoke
+	// the catch handler f has already released. Same rule as wireFetch.
+	subtle.Call("digest", "SHA-256", buf).Call("then", onOK, onErr)
+}
+
+// setFetchHeader writes into cfg.Headers, allocating the map on first use.
+func setFetchHeader(cfg *FetchConfig, key, value string) {
+	if cfg.Headers == nil {
+		cfg.Headers = map[string]string{}
+	}
+	cfg.Headers[key] = value
+}
+
+// hexOfDigest renders subtle.digest's ArrayBuffer as lowercase hex, the form
+// x-amz-content-sha256 takes.
+func hexOfDigest(buf js.Value) string {
+	arr := js.Global().Get("Uint8Array").New(buf)
+	n := arr.Length()
+	const hexDigits = "0123456789abcdef"
+	out := make([]byte, 0, n*2)
+	for i := 0; i < n; i++ {
+		b := byte(arr.Index(i).Int())
+		out = append(out, hexDigits[b>>4], hexDigits[b&0x0f])
+	}
+	return string(out)
+}
 
 // providerMetaSelector finds the server-rendered marker that says which provider
 // the app is deployed on. It is static SSR HTML, present before the WASM boots.
@@ -425,23 +519,6 @@ func prepareFetch(url string, cfg FetchConfig) (string, js.Value, js.Value, fetc
 	init := js.Global().Get("Object").New()
 	init.Set("method", cfg.Method)
 
-	// On AWS the app sits behind CloudFront OAC (SigV4) → Lambda Function URL with
-	// AWS_IAM, which rejects any request whose body hash header is missing or wrong.
-	// htmx-go signs its own requests through an in-path transformer; Fetch calls the
-	// browser's fetch() directly and so has to sign here. Gated on the provider
-	// marker AND same-origin: a request to a third-party API must never carry this
-	// header, and off AWS there is nothing to satisfy. See fetchsign.go.
-	if shouldSignFetch(providerIsAWS(), sameOriginURL(url, pageOrigin())) {
-		if cfg.Headers == nil {
-			cfg.Headers = map[string]string{}
-		}
-		// A caller-supplied header wins: they may be reproducing a payload we
-		// cannot see, and silently overwriting it would be worse than trusting it.
-		if _, ok := cfg.Headers[sigv4.ContentSha256Header]; !ok {
-			cfg.Headers[sigv4.ContentSha256Header] = fetchBodyHash(cfg.Body, cfg.BodyBytes)
-		}
-	}
-
 	if len(cfg.Headers) > 0 {
 		headers := js.Global().Get("Object").New()
 		for k, v := range cfg.Headers {
@@ -597,11 +674,18 @@ func Fetch(url string, config ...FetchConfig) (Response, error) {
 		cfg = config[0]
 	}
 
-	url, init, ac, life := prepareFetch(url, cfg)
-
 	ch := make(chan FetchResult, 1)
-	wireFetch(js.Global().Call("fetch", url, init), life, func(resp Response, err error) {
-		ch <- FetchResult{Response: resp, Err: err}
+	// ac is only known once the request is actually dispatched, which on the AWS
+	// signing path happens after the body hash resolves. A halt arriving before
+	// that has nothing to abort — the fetch has not started — so the zero Value is
+	// the correct state, not a missing one.
+	var ac js.Value
+	withBodyHash(url, &cfg, func() {
+		u, init, a, life := prepareFetch(url, cfg)
+		ac = a
+		wireFetch(js.Global().Call("fetch", u, init), life, func(resp Response, err error) {
+			ch <- FetchResult{Response: resp, Err: err}
+		})
 	})
 
 	restore := parkScope()
@@ -610,7 +694,9 @@ func Fetch(url string, config ...FetchConfig) (Response, error) {
 	case r := <-ch:
 		return r.Response, r.Err
 	case <-GothicHaltChan():
-		ac.Call("abort")
+		if ac.Truthy() {
+			ac.Call("abort")
+		}
 		return Response{}, errAborted
 	}
 }
@@ -622,9 +708,15 @@ func Fetch(url string, config ...FetchConfig) (Response, error) {
 // request is aborted on component teardown via a per-scope AbortController.
 func FetchAsync(url string, cfg FetchConfig, done func(Response, error)) {
 	sc := CaptureScope()
-	url, init, _, life := prepareFetch(url, cfg)
-	wireFetch(js.Global().Call("fetch", url, init), life, func(resp Response, err error) {
-		runInScope(sc, func() { done(resp, err) })
+	// withBodyHash is synchronous unless the request is being signed for AWS, so
+	// the no-goroutine, no-block contract above holds either way: on the signing
+	// path the dispatch simply moves into the digest's promise callback, which is
+	// still the browser driving it.
+	withBodyHash(url, &cfg, func() {
+		u, init, _, life := prepareFetch(url, cfg)
+		wireFetch(js.Global().Call("fetch", u, init), life, func(resp Response, err error) {
+			runInScope(sc, func() { done(resp, err) })
+		})
 	})
 }
 
@@ -638,10 +730,14 @@ func FetchChan(url string, cfg ...FetchConfig) <-chan FetchResult {
 	if len(cfg) > 0 {
 		c = cfg[0]
 	}
-	url, init, _, life := prepareFetch(url, c)
 	ch := make(chan FetchResult, 1)
-	wireFetch(js.Global().Call("fetch", url, init), life, func(resp Response, err error) {
-		ch <- FetchResult{Response: resp, Err: err}
+	// The channel is returned immediately either way; on the signing path it is
+	// simply filled one promise turn later.
+	withBodyHash(url, &c, func() {
+		u, init, _, life := prepareFetch(url, c)
+		wireFetch(js.Global().Call("fetch", u, init), life, func(resp Response, err error) {
+			ch <- FetchResult{Response: resp, Err: err}
+		})
 	})
 	return ch
 }
@@ -655,25 +751,35 @@ func Document() JSValue { return JSValue{js.Global().Get("document")} }
 
 func ConsoleLog(args ...any) { js.Global().Get("console").Call("log", toJSArgs(args)...) }
 
-func GetElementById(id string) JSValue    { return JSValue{js.Global().Get("document").Call("getElementById", id)} }
-func CreateElement(tag string) JSValue    { return JSValue{js.Global().Get("document").Call("createElement", tag)} }
-func QuerySelector(sel string) JSValue    { return JSValue{js.Global().Get("document").Call("querySelector", sel)} }
-func QuerySelectorAll(sel string) JSValue { return JSValue{js.Global().Get("document").Call("querySelectorAll", sel)} }
+func GetElementById(id string) JSValue {
+	return JSValue{js.Global().Get("document").Call("getElementById", id)}
+}
+func CreateElement(tag string) JSValue {
+	return JSValue{js.Global().Get("document").Call("createElement", tag)}
+}
+func QuerySelector(sel string) JSValue {
+	return JSValue{js.Global().Get("document").Call("querySelector", sel)}
+}
+func QuerySelectorAll(sel string) JSValue {
+	return JSValue{js.Global().Get("document").Call("querySelectorAll", sel)}
+}
 
-func (v JSValue) Get(key string) JSValue                  { return JSValue{v.v.Get(key)} }
-func (v JSValue) Set(key string, val any)                 { v.v.Set(key, toJSVal(val)) }
-func (v JSValue) Call(method string, args ...any) JSValue { return JSValue{v.v.Call(method, toJSArgs(args)...)} }
-func (v JSValue) New(args ...any) JSValue                 { return JSValue{v.v.New(toJSArgs(args)...)} }
-func (v JSValue) String() string                          { return v.v.String() }
-func (v JSValue) Int() int                                { return v.v.Int() }
-func (v JSValue) Float() float64                          { return v.v.Float() }
-func (v JSValue) Bool() bool                              { return v.v.Bool() }
-func (v JSValue) IsNull() bool                            { return v.v.IsNull() }
-func (v JSValue) IsUndefined() bool                       { return v.v.IsUndefined() }
-func (v JSValue) Truthy() bool                            { return v.v.Truthy() }
-func (v JSValue) Index(i int) JSValue                     { return JSValue{v.v.Index(i)} }
-func (v JSValue) SetIndex(i int, val any)                 { v.v.SetIndex(i, toJSVal(val)) }
-func (v JSValue) Length() int                             { return v.v.Length() }
+func (v JSValue) Get(key string) JSValue  { return JSValue{v.v.Get(key)} }
+func (v JSValue) Set(key string, val any) { v.v.Set(key, toJSVal(val)) }
+func (v JSValue) Call(method string, args ...any) JSValue {
+	return JSValue{v.v.Call(method, toJSArgs(args)...)}
+}
+func (v JSValue) New(args ...any) JSValue { return JSValue{v.v.New(toJSArgs(args)...)} }
+func (v JSValue) String() string          { return v.v.String() }
+func (v JSValue) Int() int                { return v.v.Int() }
+func (v JSValue) Float() float64          { return v.v.Float() }
+func (v JSValue) Bool() bool              { return v.v.Bool() }
+func (v JSValue) IsNull() bool            { return v.v.IsNull() }
+func (v JSValue) IsUndefined() bool       { return v.v.IsUndefined() }
+func (v JSValue) Truthy() bool            { return v.v.Truthy() }
+func (v JSValue) Index(i int) JSValue     { return JSValue{v.v.Index(i)} }
+func (v JSValue) SetIndex(i int, val any) { v.v.SetIndex(i, toJSVal(val)) }
+func (v JSValue) Length() int             { return v.v.Length() }
 
 func CopyBytesToJS(dst JSValue, src []byte) int { return js.CopyBytesToJS(dst.v, src) }
 func CopyBytesToGo(dst []byte, src JSValue) int { return js.CopyBytesToGo(dst, src.v) }
@@ -760,10 +866,12 @@ func ExecJS(script string) {
 }
 
 // Navigation helpers.
-func Navigate(url string)         { js.Global().Get("location").Set("href", url) }
-func Reload()                     { js.Global().Get("location").Call("reload") }
-func PushState(url, title string) { js.Global().Get("history").Call("pushState", js.Null(), title, url) }
-func GoBack()                     { js.Global().Get("history").Call("back") }
+func Navigate(url string) { js.Global().Get("location").Set("href", url) }
+func Reload()             { js.Global().Get("location").Call("reload") }
+func PushState(url, title string) {
+	js.Global().Get("history").Call("pushState", js.Null(), title, url)
+}
+func GoBack() { js.Global().Get("history").Call("back") }
 
 // LocalStorage helpers
 func LocalStorageSet(key, value string) {
