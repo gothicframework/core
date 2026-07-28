@@ -7,6 +7,7 @@ import (
 	"strconv"
 
 	"github.com/gothicframework/core/gothiccore"
+	"github.com/gothicframework/core/wasmexec"
 )
 
 // wasm_bootstrap.go isolates the HTML/JS surface used to bootstrap a WASM module
@@ -122,14 +123,18 @@ func wasmExecFile(compiler WasmCompiler) string {
 // wasmExecPath returns the URL the bootstrap fetches the wasm_exec shim from.
 // The two shims live in DIFFERENT places:
 //   - TinyGo's wasm_exec.js is a framework artifact served from the embed via
-//     the /_gothic/ route (no longer copied into public/).
+//     the /_gothic/ route (no longer copied into public/). Its URL carries a
+//     ?v=<content hash>, which is what lets a toolchain bump reach a browser:
+//     /_gothic/* is served immutably for a year, so a bare path would pin the
+//     shim a visitor first cached against a core that has since moved on.
 //   - The standard-Go wasm_exec_go.js is copied from the USER's GOROOT at build
-//     time (version-tied to their toolchain), so it stays in /public/.
+//     time (version-tied to their toolchain), so it stays in /public/, which is
+//     served from S3 on a bounded TTL rather than immutably.
 func wasmExecPath(compiler WasmCompiler) string {
 	if compiler == Golang {
 		return "/public/wasm_exec_go.js"
 	}
-	return "/_gothic/wasm_exec.js"
+	return wasmexec.AssetPath()
 }
 
 // injectWasmEnvelope is a convenience helper that owns the instance id for one

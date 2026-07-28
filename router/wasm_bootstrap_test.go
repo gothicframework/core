@@ -8,7 +8,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gothicframework/core/corewasm"
 	"github.com/gothicframework/core/gothiccore"
+	"github.com/gothicframework/core/wasmexec"
 )
 
 // TestInjectGothicScope_FullPage verifies a full-page HTML doc is stamped on its
@@ -571,5 +573,55 @@ func TestInjectWasmBootstrap_TeardownIdempotentGuards(t *testing.T) {
 		if !strings.Contains(core, g) {
 			t.Errorf("expected teardown re-entrancy guard %q in gothic-core.js", g)
 		}
+	}
+}
+
+// TestEveryEmittedGothicURLIsVersioned is the guard for immutable caching.
+//
+// /_gothic/* is served with a one-year immutable Cache-Control outside dev, and a
+// CDN invalidation cannot reach a browser that already holds the file. The ONLY
+// thing that lets a framework upgrade land on a returning visitor is the URL
+// changing with the bytes, so every /_gothic/ URL the framework emits must carry
+// a ?v=<content hash>.
+//
+// This caught a real bug: the per-instance bootstrap fetched a bare
+// /_gothic/wasm_exec.js, which the immutable header would have pinned in every
+// visitor's browser for a year, leaving an old TinyGo shim paired with a newer
+// core — the exact shim/runtime mismatch the wasmexec package doc warns about,
+// except unreachable by any redeploy.
+func TestEveryEmittedGothicURLIsVersioned(t *testing.T) {
+	// Every surface that can emit a /_gothic/ reference.
+	emitted := []string{
+		gothiccore.AssetPath(),
+		corewasm.WASMAssetPath(),
+		corewasm.BootAssetPath(),
+		wasmexec.AssetPath(),
+		wasmExecPath(GothicTinyGo),
+		wasmExecPath(LocalTinyGo),
+		string(injectWasmBootstrap(
+			[]byte(`<html><body data-gothic-wasm="counter" data-gothic-inst="abc">x</body></html>`),
+			"counter", BROTLI, GothicTinyGo, "abc", false)),
+		string(corewasm.BootJS()),
+	}
+
+	re := regexp.MustCompile(`/_gothic/[a-zA-Z0-9._-]+`)
+	for _, subject := range emitted {
+		for _, loc := range re.FindAllStringIndex(subject, -1) {
+			url := subject[loc[0]:loc[1]]
+			rest := subject[loc[1]:]
+			if !strings.HasPrefix(rest, "?v=") {
+				t.Errorf("%s is emitted without a ?v= cache-buster; served immutably it can never be replaced in a browser", url)
+			}
+		}
+	}
+}
+
+// TestGolangCompilerShimStaysUnversioned pins the other side: the standard-Go
+// shim is copied from the USER's GOROOT into /public/, which is served on a
+// bounded TTL rather than immutably, so it neither needs nor has a framework
+// content hash.
+func TestGolangCompilerShimStaysUnversioned(t *testing.T) {
+	if got := wasmExecPath(Golang); got != "/public/wasm_exec_go.js" {
+		t.Errorf("wasmExecPath(Golang) = %q, want the unversioned /public/ path", got)
 	}
 }

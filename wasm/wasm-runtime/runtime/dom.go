@@ -9,7 +9,57 @@ import (
 	"strings"
 	"syscall/js"
 	"unsafe"
+
+	"github.com/gothicframework/htmx-go/v2/ext/sigv4"
 )
+
+// providerMetaSelector finds the server-rendered marker that says which provider
+// the app is deployed on. It is static SSR HTML, present before the WASM boots.
+const providerMetaSelector = `meta[name="gothic-provider"]`
+
+// providerIsAWS reports whether the page declares the AWS provider. Resolved once
+// per instance: the marker cannot change during the page's life, and this sits on
+// the Fetch hot path.
+var providerIsAWSOnce struct {
+	done bool
+	val  bool
+}
+
+func providerIsAWS() bool {
+	if providerIsAWSOnce.done {
+		return providerIsAWSOnce.val
+	}
+	providerIsAWSOnce.done = true
+	doc := js.Global().Get("document")
+	if !doc.Truthy() {
+		return false
+	}
+	meta := doc.Call("querySelector", providerMetaSelector)
+	if !meta.Truthy() {
+		return false
+	}
+	content := meta.Call("getAttribute", "content")
+	if content.Type() != js.TypeString {
+		return false
+	}
+	providerIsAWSOnce.val = content.String() == "AWS"
+	return providerIsAWSOnce.val
+}
+
+// pageOrigin returns location.origin ("https://host[:port]"), or "" when it is
+// unavailable — in which case nothing is treated as same-origin and no request is
+// signed, which is the safe direction to fail.
+func pageOrigin() string {
+	loc := js.Global().Get("location")
+	if !loc.Truthy() {
+		return ""
+	}
+	o := loc.Get("origin")
+	if o.Type() != js.TypeString {
+		return ""
+	}
+	return o.String()
+}
 
 // Scope-aware DOM helpers.
 //
@@ -374,6 +424,23 @@ func prepareFetch(url string, cfg FetchConfig) (string, js.Value, js.Value, fetc
 	// Build fetch init object
 	init := js.Global().Get("Object").New()
 	init.Set("method", cfg.Method)
+
+	// On AWS the app sits behind CloudFront OAC (SigV4) → Lambda Function URL with
+	// AWS_IAM, which rejects any request whose body hash header is missing or wrong.
+	// htmx-go signs its own requests through an in-path transformer; Fetch calls the
+	// browser's fetch() directly and so has to sign here. Gated on the provider
+	// marker AND same-origin: a request to a third-party API must never carry this
+	// header, and off AWS there is nothing to satisfy. See fetchsign.go.
+	if shouldSignFetch(providerIsAWS(), sameOriginURL(url, pageOrigin())) {
+		if cfg.Headers == nil {
+			cfg.Headers = map[string]string{}
+		}
+		// A caller-supplied header wins: they may be reproducing a payload we
+		// cannot see, and silently overwriting it would be worse than trusting it.
+		if _, ok := cfg.Headers[sigv4.ContentSha256Header]; !ok {
+			cfg.Headers[sigv4.ContentSha256Header] = fetchBodyHash(cfg.Body, cfg.BodyBytes)
+		}
+	}
 
 	if len(cfg.Headers) > 0 {
 		headers := js.Global().Get("Object").New()
