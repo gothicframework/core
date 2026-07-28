@@ -14,16 +14,17 @@ import (
 )
 
 // TestInjectGothicScope_FullPage verifies a full-page HTML doc is stamped on its
-// <body> tag with both data-gothic-wasm and data-gothic-inst attributes.
+// <body> tag with data-gothic-wasm but NOT data-gothic-inst (the instance id is
+// now generated at runtime by the browser-side bootstrap JS).
 func TestInjectGothicScope_FullPage(t *testing.T) {
 	in := []byte(`<html><head></head><body><h1>hi</h1></body></html>`)
-	out, inst := injectGothicScope(in, "components-pingmirror")
+	out := injectGothicScope(in, "components-pingmirror")
 
-	if inst == "" {
-		t.Fatal("expected a non-empty instance id")
+	if !bytes.Contains(out, []byte(`<body data-gothic-wasm="components-pingmirror">`)) {
+		t.Errorf("expected <body> to carry data-gothic-wasm, got: %s", out)
 	}
-	if !bytes.Contains(out, []byte(`<body data-gothic-wasm="components-pingmirror" data-gothic-inst="`+inst+`">`)) {
-		t.Errorf("expected <body> to carry the gothic-wasm + gothic-inst attributes, got: %s", out)
+	if bytes.Contains(out, []byte(`data-gothic-inst`)) {
+		t.Errorf("body must NOT carry data-gothic-inst (now generated at runtime by JS), got: %s", out)
 	}
 	// The original document tags must still be present and unaltered.
 	if !bytes.Contains(out, []byte(`<h1>hi</h1>`)) {
@@ -35,17 +36,18 @@ func TestInjectGothicScope_FullPage(t *testing.T) {
 }
 
 // TestInjectGothicScope_Fragment verifies HTML with no <body> is wrapped in a
-// display-contents <div> that carries the instance id.
+// display-contents <div> that carries data-gothic-wasm but NOT data-gothic-inst
+// (the instance id is now generated at runtime by the browser-side bootstrap JS).
 func TestInjectGothicScope_Fragment(t *testing.T) {
 	in := []byte(`<section>hello</section>`)
-	out, inst := injectGothicScope(in, "components-pingmirror")
+	out := injectGothicScope(in, "components-pingmirror")
 
-	if inst == "" {
-		t.Fatal("expected a non-empty instance id")
-	}
-	expectedOpen := `<div data-gothic-wasm="components-pingmirror" data-gothic-inst="` + inst + `" style="display:contents">`
+	expectedOpen := `<div data-gothic-wasm="components-pingmirror" style="display:contents">`
 	if !bytes.HasPrefix(out, []byte(expectedOpen)) {
 		t.Errorf("expected output to open with %q, got %s", expectedOpen, out)
+	}
+	if bytes.Contains(out, []byte(`data-gothic-inst`)) {
+		t.Errorf("fragment must NOT carry data-gothic-inst (now generated at runtime by JS), got: %s", out)
 	}
 	if !bytes.HasSuffix(out, []byte(`</div>`)) {
 		t.Errorf("expected output to close with </div>, got %s", out)
@@ -58,20 +60,27 @@ func TestInjectGothicScope_Fragment(t *testing.T) {
 // TestInjectGothicScopeDurable_OptInStampsAttribute verifies the opt-in:
 // a non-empty durable key stamps data-gothic-durable-key on the wrapper (so the
 // runtime's DurableKey resolves it and rehydrates from the core), on both the
-// full-page and fragment paths.
+// full-page and fragment paths. The wrapper must NOT carry data-gothic-inst
+// (now generated at runtime by the browser-side bootstrap JS).
 func TestInjectGothicScopeDurable_OptInStampsAttribute(t *testing.T) {
 	full := []byte(`<html><head></head><body><h1>hi</h1></body></html>`)
-	out, inst := injectGothicScopeDurable(full, "components-cart", "cart-42")
-	want := `<body data-gothic-wasm="components-cart" data-gothic-inst="` + inst + `" data-gothic-durable-key="cart-42">`
+	out := injectGothicScopeDurable(full, "components-cart", "cart-42")
+	want := `<body data-gothic-wasm="components-cart" data-gothic-durable-key="cart-42">`
 	if !bytes.Contains(out, []byte(want)) {
 		t.Errorf("full-page durable envelope missing durable key attribute.\n got: %s\nwant substr: %s", out, want)
 	}
+	if bytes.Contains(out, []byte(`data-gothic-inst`)) {
+		t.Errorf("full-page durable envelope must NOT carry data-gothic-inst, got: %s", out)
+	}
 
 	frag := []byte(`<section>hello</section>`)
-	fout, finst := injectGothicScopeDurable(frag, "components-cart", "cart-42")
-	fwant := `<div data-gothic-wasm="components-cart" data-gothic-inst="` + finst + `" data-gothic-durable-key="cart-42" style="display:contents">`
+	fout := injectGothicScopeDurable(frag, "components-cart", "cart-42")
+	fwant := `<div data-gothic-wasm="components-cart" data-gothic-durable-key="cart-42" style="display:contents">`
 	if !bytes.HasPrefix(fout, []byte(fwant)) {
 		t.Errorf("fragment durable envelope missing durable key attribute.\n got: %s\nwant prefix: %s", fout, fwant)
+	}
+	if bytes.Contains(fout, []byte(`data-gothic-inst`)) {
+		t.Errorf("fragment durable envelope must NOT carry data-gothic-inst, got: %s", fout)
 	}
 }
 
@@ -85,38 +94,29 @@ func TestInjectGothicScope_NonDurableOutputUnchanged(t *testing.T) {
 		[]byte(`<html><head></head><body><h1>hi</h1></body></html>`),
 		[]byte(`<section>hello</section>`),
 	} {
-		out, _ := injectGothicScope(in, "components-plain")
+		out := injectGothicScope(in, "components-plain")
 		if bytes.Contains(out, []byte("data-gothic-durable-key")) {
 			t.Errorf("non-durable envelope must not carry a durable key attribute, got: %s", out)
+		}
+		if bytes.Contains(out, []byte("data-gothic-inst")) {
+			t.Errorf("non-durable envelope must not carry data-gothic-inst, got: %s", out)
 		}
 	}
 }
 
 // TestInjectGothicScope_UniqueInstancePerCall guards the duplicate-component
-// contract: two calls with the SAME wasmName must produce different
-// data-gothic-inst values so the JS selector can disambiguate duplicate
-// components on the same page.
+// contract: the server-side wrapper must NOT carry data-gothic-inst (the
+// instance id is now generated at runtime by the browser-side bootstrap JS
+// via Math.random(), which gives each render a unique id regardless of HTTP
+// response reuse from CDNs, caches, or WebKit dedup).
 func TestInjectGothicScope_UniqueInstancePerCall(t *testing.T) {
 	in := []byte(`<section>x</section>`)
-	collisions := 0
 	const n = 50
-	seen := make(map[string]struct{}, n)
 	for i := 0; i < n; i++ {
-		_, inst := injectGothicScope(in, "components-pingmirror")
-		if _, dup := seen[inst]; dup {
-			collisions++
+		out := injectGothicScope(in, "components-pingmirror")
+		if bytes.Contains(out, []byte(`data-gothic-inst`)) {
+			t.Errorf("wrappers must NOT carry data-gothic-inst (generated at runtime by JS), iteration %d: %s", i, out)
 		}
-		seen[inst] = struct{}{}
-	}
-	// A handful of collisions in a 32-bit random space is statistically
-	// unexpected at n=50 but not impossible. Anything above 2 is a real bug.
-	if collisions > 2 {
-		t.Errorf("expected near-zero instance id collisions across %d calls, got %d", n, collisions)
-	}
-	// And we must have at least two distinct ids — anything else means the rng
-	// is degenerate.
-	if len(seen) < 2 {
-		t.Errorf("expected at least 2 distinct instance ids, got %d", len(seen))
 	}
 }
 
@@ -124,8 +124,8 @@ func TestInjectGothicScope_UniqueInstancePerCall(t *testing.T) {
 // </body>, the wasm filename uses the correct extension per compression, and
 // the JS selector targets the body that carries the wasm attribute.
 func TestInjectWasmBootstrap_FullPage_Gzip(t *testing.T) {
-	in := []byte(`<html><body data-gothic-wasm="counter" data-gothic-inst="abc">x</body></html>`)
-	out := injectWasmBootstrap(in, "counter", GZIP, GothicTinyGo, "abc", false)
+	in := []byte(`<html><body data-gothic-wasm="counter">x</body></html>`)
+	out := injectWasmBootstrap(in, "counter", GZIP, GothicTinyGo, false)
 
 	if !bytes.Contains(out, []byte(`</body></html>`)) {
 		t.Errorf("expected the doc to keep its closing tags: %s", out)
@@ -146,25 +146,26 @@ func TestInjectWasmBootstrap_FullPage_Gzip(t *testing.T) {
 
 func TestInjectWasmBootstrap_FullPage_Brotli(t *testing.T) {
 	in := []byte(`<html><body>x</body></html>`)
-	out := injectWasmBootstrap(in, "counter", BROTLI, GothicTinyGo, "abc", false)
+	out := injectWasmBootstrap(in, "counter", BROTLI, GothicTinyGo, false)
 	if !bytes.Contains(out, []byte(`'/public/wasm/'+wn+'.wasm.br'`)) {
 		t.Errorf("expected brotli extension in the WASM fetch URL: %s", out)
 	}
 }
 
 // TestInjectWasmBootstrap_Fragment verifies fragments get the bootstrap
-// appended (no </body> replacement) and the findEl expression carries the
-// data-gothic-inst selector so duplicate-component pages resolve correctly.
+// appended (no </body> replacement) and the findEl expression uses
+// :not([data-gothic-scope]) to target the first uninitialized wrapper.
 func TestInjectWasmBootstrap_Fragment(t *testing.T) {
-	in := []byte(`<div data-gothic-wasm="components-pingmirror" data-gothic-inst="deadbeef" style="display:contents">x</div>`)
-	out := injectWasmBootstrap(in, "components-pingmirror", GZIP, GothicTinyGo, "deadbeef", false)
+	in := []byte(`<div data-gothic-wasm="components-pingmirror" style="display:contents">x</div>`)
+	out := injectWasmBootstrap(in, "components-pingmirror", GZIP, GothicTinyGo, false)
 
 	if !bytes.HasSuffix(out, []byte(`</script>`)) {
 		t.Errorf("expected fragment output to end with </script>, got: %s", out)
 	}
-	// The findEl expression must reference both the wasm name AND the per-instance id.
-	if !bytes.Contains(out, []byte(`document.querySelector('[data-gothic-wasm="components-pingmirror"][data-gothic-inst="deadbeef"]')`)) {
-		t.Errorf("expected the fragment selector to scope by data-gothic-inst, got: %s", out)
+	// The findEl expression must use :not([data-gothic-scope]) instead of
+	// data-gothic-inst so the selector targets the first uninitialized wrapper.
+	if !bytes.Contains(out, []byte(`document.querySelector('[data-gothic-wasm="components-pingmirror"]:not([data-gothic-scope])')`)) {
+		t.Errorf("expected the fragment selector to use :not([data-gothic-scope]), got: %s", out)
 	}
 	// And the previousElementSibling fast path must still be there.
 	if !bytes.Contains(out, []byte(`document.currentScript&&document.currentScript.previousElementSibling`)) {
@@ -173,25 +174,24 @@ func TestInjectWasmBootstrap_Fragment(t *testing.T) {
 }
 
 // TestInjectWasmEnvelope_EndToEnd is the high-level integration test for the
-// helper that callers actually use. It must thread the SAME instance id from
-// the wrapper through to the JS selector.
+// helper that callers actually use. The wrapper must NOT carry data-gothic-inst
+// (generated at runtime by the JS bootstrap), and the JS must contain the
+// Math.random() generation logic plus el.setAttribute('data-gothic-inst', inst).
 func TestInjectWasmEnvelope_EndToEnd_Fragment(t *testing.T) {
 	in := []byte(`<section>hi</section>`)
 	out := injectWasmEnvelope(in, "components-pingmirror", GZIP, GothicTinyGo, false)
 
-	// Extract the instance id from the wrapper and from the bootstrap script;
-	// they MUST be the same value, otherwise duplicate components on the same
-	// page will end up sharing state again.
-	re := regexp.MustCompile(`data-gothic-inst="([0-9a-f]+)"`)
-	matches := re.FindAllSubmatch(out, -1)
-	if len(matches) < 2 {
-		t.Fatalf("expected at least two data-gothic-inst occurrences (wrapper + selector), got %d in: %s", len(matches), out)
+	// Wrapper must NOT carry data-gothic-inst.
+	if bytes.Contains(out, []byte(`data-gothic-inst="`)) {
+		t.Errorf("wrapper must NOT carry data-gothic-inst in HTML (now generated by JS at runtime), got: %s", out)
 	}
-	first := string(matches[0][1])
-	for i, m := range matches {
-		if string(m[1]) != first {
-			t.Fatalf("instance id mismatch between wrapper and bootstrap (match %d = %q, expected %q): %s", i, string(m[1]), first, out)
-		}
+	// The JS bootstrap must contain the Math.random() based inst generation.
+	if !bytes.Contains(out, []byte(`inst=(Math.random()*0xFFFFFFFF>>>0).toString(16).padStart(8,'0')`)) {
+		t.Errorf("expected JS to contain Math.random() inst generation, got: %s", out)
+	}
+	// And the setAttribute call that stamps it on the wrapper.
+	if !bytes.Contains(out, []byte(`el.setAttribute('data-gothic-inst',inst)`)) {
+		t.Errorf("expected JS to contain el.setAttribute('data-gothic-inst',inst), got: %s", out)
 	}
 }
 
@@ -218,7 +218,7 @@ func TestInjectWasmBootstrap_CtxSetPersistentBuffer(t *testing.T) {
 		}
 	}
 	// And the per-instance bootstrap must NOT inline it anymore.
-	out := injectWasmBootstrap([]byte(`<html><body>x</body></html>`), "counter", GZIP, GothicTinyGo, "abc", false)
+	out := injectWasmBootstrap([]byte(`<html><body>x</body></html>`), "counter", GZIP, GothicTinyGo, false)
 	if bytes.Contains(out, []byte(`var _bufs={};`)) {
 		t.Errorf("per-instance bootstrap must not inline the topic buffer pool; it belongs in gothic-core.js:\n%s", out)
 	}
@@ -270,7 +270,7 @@ func TestInjectWasmBootstrap_FindScopeOnlyDeclaredOnce(t *testing.T) {
 		t.Errorf("expected %q to appear exactly once in gothic-core.js, got %d", needle, got)
 	}
 	// The per-instance bootstrap must not redeclare it.
-	out := injectWasmBootstrap([]byte(`<html><body>x</body></html>`), "counter", GZIP, GothicTinyGo, "abc", false)
+	out := injectWasmBootstrap([]byte(`<html><body>x</body></html>`), "counter", GZIP, GothicTinyGo, false)
 	if bytes.Contains(out, []byte(needle)) {
 		t.Errorf("per-instance bootstrap must not declare __gothicFindScope; it belongs in gothic-core.js:\n%s", out)
 	}
@@ -278,29 +278,26 @@ func TestInjectWasmBootstrap_FindScopeOnlyDeclaredOnce(t *testing.T) {
 
 // TestInjectWasmEnvelope_UniqueAcrossCalls confirms the duplicate-component
 // regression contract: two renders of the same component produce envelopes
-// with distinct instance ids embedded BOTH on the wrapper AND inside the JS
-// selector.
+// WITHOUT server-side data-gothic-inst in the HTML. The instance id is now
+// generated at runtime by the browser-side bootstrap JS via Math.random().
 func TestInjectWasmEnvelope_UniqueAcrossCalls(t *testing.T) {
 	in := []byte(`<section>hi</section>`)
 	a := injectWasmEnvelope(in, "components-pingmirror", GZIP, GothicTinyGo, false)
 	b := injectWasmEnvelope(in, "components-pingmirror", GZIP, GothicTinyGo, false)
 
-	re := regexp.MustCompile(`data-gothic-inst="([0-9a-f]+)"`)
-	matchA := re.FindSubmatch(a)
-	matchB := re.FindSubmatch(b)
-	if matchA == nil || matchB == nil {
-		t.Fatalf("missing data-gothic-inst in one of the envelopes\nA:%s\nB:%s", a, b)
+	// Neither envelope must carry data-gothic-inst in the HTML wrapper.
+	if bytes.Contains(a, []byte(`data-gothic-inst="`)) {
+		t.Errorf("envelope A must NOT carry data-gothic-inst in HTML, got: %s", a)
 	}
-	if string(matchA[1]) == string(matchB[1]) {
-		t.Errorf("expected different instance ids across calls, got %q for both", matchA[1])
+	if bytes.Contains(b, []byte(`data-gothic-inst="`)) {
+		t.Errorf("envelope B must NOT carry data-gothic-inst in HTML, got: %s", b)
 	}
-	// And the bootstrap selectors should each carry their own instance id —
-	// not the other render's id.
-	if !strings.Contains(string(a), `data-gothic-inst="`+string(matchA[1])+`"`) {
-		t.Errorf("envelope A's selector does not carry envelope A's instance id: %s", a)
+	// Both must contain the Math.random() inst generation.
+	if !bytes.Contains(a, []byte(`inst=(Math.random()*0xFFFFFFFF>>>0).toString(16).padStart(8,'0')`)) {
+		t.Errorf("envelope A is missing Math.random() inst generation: %s", a)
 	}
-	if !strings.Contains(string(b), `data-gothic-inst="`+string(matchB[1])+`"`) {
-		t.Errorf("envelope B's selector does not carry envelope B's instance id: %s", b)
+	if !bytes.Contains(b, []byte(`inst=(Math.random()*0xFFFFFFFF>>>0).toString(16).padStart(8,'0')`)) {
+		t.Errorf("envelope B is missing Math.random() inst generation: %s", b)
 	}
 }
 
@@ -309,7 +306,7 @@ func TestInjectWasmEnvelope_UniqueAcrossCalls(t *testing.T) {
 // defensive _ensureCore loader carrying the content-hash cache-buster) and no
 // longer inlines the shared preamble globals.
 func TestInjectWasmBootstrap_ReferencesGothicCore(t *testing.T) {
-	out := injectWasmBootstrap([]byte(`<html><body>x</body></html>`), "counter", GZIP, GothicTinyGo, "abc", false)
+	out := injectWasmBootstrap([]byte(`<html><body>x</body></html>`), "counter", GZIP, GothicTinyGo, false)
 
 	// References gothic-core.js with the same versioned URL the layout loads.
 	if !bytes.Contains(out, []byte(`/_gothic/gothic-core.js?v=`+gothiccore.Version())) {
@@ -376,7 +373,7 @@ func TestGothicCoreAssetEmitted(t *testing.T) {
 func TestInjectWasmBootstrap_HxBoostFallbackSelector(t *testing.T) {
 	const wasmName = "login-page"
 	in := []byte(`<html><body data-gothic-wasm="some-previous-page">x</body></html>`)
-	out := injectWasmBootstrap(in, wasmName, GZIP, GothicTinyGo, "abc", false)
+	out := injectWasmBootstrap(in, wasmName, GZIP, GothicTinyGo, false)
 
 	// Branch 1: the primary selector must still target a body that already
 	// carries the correct data-gothic-wasm (the non-boosted, fresh-load case).
@@ -490,7 +487,7 @@ func TestInjectWasmBootstrap_TeardownPreambleInjected(t *testing.T) {
 	}
 	// The instance is still stored in a per-scope slot at mount by the
 	// per-instance bootstrap so teardown (in core) can drop it.
-	out := injectWasmBootstrap([]byte(`<html><body>x</body></html>`), "counter", GZIP, GothicTinyGo, "abc", false)
+	out := injectWasmBootstrap([]byte(`<html><body>x</body></html>`), "counter", GZIP, GothicTinyGo, false)
 	// The slot stores go+instance (dropped by teardown) plus the zero-copy
 	// __setText setter, whose closure captures the instance and is therefore
 	// released for free when teardown deletes __gothicInstances[id].
@@ -508,7 +505,7 @@ func TestInjectWasmBootstrap_TeardownPreambleInjected(t *testing.T) {
 // PREVIOUS one before registering itself — so full-page navigation stops leaking
 // one live WASM instance per navigation.
 func TestInjectWasmBootstrap_FullPageScopeTeardown(t *testing.T) {
-	out := injectWasmBootstrap([]byte(`<html><body>x</body></html>`), "counter", GZIP, GothicTinyGo, "abc", false)
+	out := injectWasmBootstrap([]byte(`<html><body>x</body></html>`), "counter", GZIP, GothicTinyGo, false)
 
 	// The full-page detection must key off el===document.body (the body node
 	// persists across hx-boost, so this is the only stable full-page signal).
@@ -599,8 +596,8 @@ func TestEveryEmittedGothicURLIsVersioned(t *testing.T) {
 		wasmExecPath(GothicTinyGo),
 		wasmExecPath(LocalTinyGo),
 		string(injectWasmBootstrap(
-			[]byte(`<html><body data-gothic-wasm="counter" data-gothic-inst="abc">x</body></html>`),
-			"counter", BROTLI, GothicTinyGo, "abc", false)),
+			[]byte(`<html><body data-gothic-wasm="counter">x</body></html>`),
+			"counter", BROTLI, GothicTinyGo, false)),
 		string(corewasm.BootJS()),
 	}
 

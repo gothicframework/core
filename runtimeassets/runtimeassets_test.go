@@ -14,15 +14,15 @@ import (
 )
 
 // TestRegistryHasAllAssets guards that every runtime asset the framework serves
-// from its embed (the ones that used to be copied into public/, plus the
-// self-hosted third-party scripts) is registered.
+// from its embed is registered. The exec shim is a single asset (wasm_exec.js)
+// shared by the core and per-instance components — gothic-core-exec.js is no
+// longer served as a separate duplicate.
 func TestRegistryHasAllAssets(t *testing.T) {
 	want := []string{
 		gothiccore.FileName,     // gothic-core.js
 		corewasm.WASMFileName,   // gothic-core.wasm
-		corewasm.ExecFileName,   // gothic-core-exec.js
 		corewasm.BootFileName,   // gothic-core-boot.js
-		"wasm_exec.js",          // TinyGo shim
+		"wasm_exec.js",          // TinyGo shim (shared with core)
 	}
 	if len(All()) != len(want) {
 		t.Errorf("registry has %d assets, want %d", len(All()), len(want))
@@ -51,7 +51,6 @@ func TestAssetBytesMatchSources(t *testing.T) {
 	}{
 		gothiccore.FileName:     {gothiccore.Minified(), contentTypeJS},
 		corewasm.WASMFileName:   {corewasm.CoreWASM(), contentTypeWASM},
-		corewasm.ExecFileName:   {corewasm.ExecJS(), contentTypeJS},
 		corewasm.BootFileName:   {corewasm.BootJS(), contentTypeJS},
 		"wasm_exec.js":          {wasmexec.Shim, contentTypeJS},
 	}

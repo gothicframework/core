@@ -129,11 +129,10 @@ func wasmExecAsset() Asset {
 
 // registry is the name→Asset lookup. Bytes and hashes are pulled from the
 // asset-owning leaf packages so there is a single source of truth per artifact.
-var registry = func() map[string]Asset {
+	var registry = func() map[string]Asset {
 	list := []Asset{
 		newAsset(gothiccore.FileName, gothiccore.Minified(), contentTypeJS, gothiccore.Version()),  // gothic-core.js (minified)
 		newAsset(corewasm.WASMFileName, corewasm.CoreWASM(), contentTypeWASM, corewasm.CoreHash()), // gothic-core.wasm
-		newAsset(corewasm.ExecFileName, corewasm.ExecJS(), contentTypeJS, corewasm.ExecHash()),     // gothic-core-exec.js
 		newAsset(corewasm.BootFileName, corewasm.BootJS(), contentTypeJS, corewasm.Version()),      // gothic-core-boot.js
 		wasmExecAsset(), // wasm_exec.js (TinyGo shim)
 	}

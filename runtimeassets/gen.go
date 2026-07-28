@@ -46,7 +46,6 @@ func main() {
 	}{
 		{gothiccore.FileName, gothiccore.Minified()},
 		{corewasm.WASMFileName, corewasm.CoreWASM()},
-		{corewasm.ExecFileName, corewasm.ExecJS()},
 		{corewasm.BootFileName, corewasm.BootJS()},
 		{"wasm_exec.js", wasmexec.Shim},
 	}

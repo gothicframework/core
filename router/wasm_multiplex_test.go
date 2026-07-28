@@ -16,8 +16,8 @@ import (
 // the live-instance register call, the pending queue for late placements, and
 // the last-scope-out teardown wrapper that halts the shared instance.
 func TestMultiplexedBootstrap_MuxBranchPresent(t *testing.T) {
-	in := []byte(`<div data-gothic-wasm="components-row" data-gothic-inst="abc" style="display:contents">x</div>`)
-	out := injectWasmBootstrap(in, "components-row", GZIP, GothicTinyGo, "abc", true)
+	in := []byte(`<div data-gothic-wasm="components-row" style="display:contents">x</div>`)
+	out := injectWasmBootstrap(in, "components-row", GZIP, GothicTinyGo, true)
 
 	// The per-placement mux run region stays inline in the per-instance script.
 	wants := [][]byte{
@@ -63,7 +63,7 @@ func TestMultiplexedBootstrap_MuxBranchPresent(t *testing.T) {
 // default path stays byte-identical to the non-multiplexed baseline.
 func TestNonMultiplexedBootstrap_NoMuxBranch(t *testing.T) {
 	in := []byte(`<html><body>x</body></html>`)
-	out := injectWasmBootstrap(in, "counter", GZIP, GothicTinyGo, "abc", false)
+	out := injectWasmBootstrap(in, "counter", GZIP, GothicTinyGo, false)
 
 	forbidden := [][]byte{
 		[]byte(`__gothicMux`),
@@ -86,8 +86,8 @@ func TestNonMultiplexedBootstrap_NoMuxBranch(t *testing.T) {
 // gothic-core.js (asserted separately).
 func TestMultiplexedBootstrap_SharedHeadIdentical(t *testing.T) {
 	frag := []byte(`<div>x</div>`)
-	non := injectWasmBootstrap(frag, "components-row", BROTLI, Golang, "deadbeef", false)
-	mux := injectWasmBootstrap(frag, "components-row", BROTLI, Golang, "deadbeef", true)
+	non := injectWasmBootstrap(frag, "components-row", BROTLI, Golang, false)
+	mux := injectWasmBootstrap(frag, "components-row", BROTLI, Golang, true)
 
 	// The shared head ends right where the run body begins: `_ensureCore(function(){`.
 	marker := []byte(`_ensureCore(function(){`)

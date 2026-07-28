@@ -9,16 +9,16 @@ import (
 	"time"
 )
 
-// TestWriteEmitsThreeArtifacts verifies Write emits the wasm, the exec shim and
-// the boot loader with the expected content.
-func TestWriteEmitsThreeArtifacts(t *testing.T) {
+// TestWriteEmitsTwoArtifacts verifies Write emits the wasm and the boot loader
+// with the expected content. The exec shim (wasm_exec.js) is no longer emitted
+// here — it is served from the /_gothic/ embed.
+func TestWriteEmitsTwoArtifacts(t *testing.T) {
 	dir := t.TempDir()
 	if err := Write(dir); err != nil {
 		t.Fatalf("Write: %v", err)
 	}
 	for name, want := range map[string][]byte{
 		WASMFileName: coreWASM,
-		ExecFileName: execJS,
 		BootFileName: []byte(bootJS),
 	} {
 		got, err := os.ReadFile(filepath.Join(dir, name))
@@ -28,6 +28,11 @@ func TestWriteEmitsThreeArtifacts(t *testing.T) {
 		if len(got) != len(want) {
 			t.Errorf("%s: emitted %d bytes, want %d", name, len(got), len(want))
 		}
+	}
+	// Verify the exec shim is NOT emitted (it's served from the embed).
+	execPath := filepath.Join(dir, "wasm_exec.js")
+	if _, err := os.Stat(execPath); err == nil {
+		t.Errorf("wasm_exec.js should not be emitted by corewasm.Write")
 	}
 }
 
@@ -45,15 +50,17 @@ func TestCoreWasmIsValidModule(t *testing.T) {
 	}
 }
 
-// TestBootHashTracksBinaries guards that the boot loader embeds both binary
-// content hashes, so a framework upgrade that changes either binary changes the
-// single ?v= the layout carries (transitive cache-bust).
+// TestBootHashTracksBinaries guards that the boot loader embeds the content
+// hashes of the core wasm and the exec shim, so a framework upgrade that
+// changes either changes the single ?v= the layout carries (transitive
+// cache-bust). The exec shim version comes from wasmexec.
 func TestBootHashTracksBinaries(t *testing.T) {
 	if !strings.Contains(bootJS, coreHash) {
 		t.Errorf("boot loader does not embed coreHash %q — core upgrades would not cache-bust", coreHash)
 	}
-	if !strings.Contains(bootJS, execHash) {
-		t.Errorf("boot loader does not embed execHash %q — exec upgrades would not cache-bust", execHash)
+	wantExecURL := "/_gothic/wasm_exec.js?v="
+	if !strings.Contains(bootJS, wantExecURL) {
+		t.Errorf("boot loader does not reference wasm_exec.js via /_gothic/ — exec upgrades would not cache-bust")
 	}
 	if !strings.Contains(BootAssetPath(), bootHash) {
 		t.Errorf("BootAssetPath %q missing bootHash %q", BootAssetPath(), bootHash)
@@ -71,7 +78,7 @@ func TestWriteIsMtimeStable(t *testing.T) {
 		t.Fatalf("first Write: %v", err)
 	}
 
-	files := []string{WASMFileName, ExecFileName, BootFileName}
+	files := []string{WASMFileName, BootFileName}
 	before := make(map[string]time.Time, len(files))
 	for _, f := range files {
 		info, err := os.Stat(filepath.Join(dir, f))

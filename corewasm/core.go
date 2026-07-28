@@ -4,15 +4,17 @@
 // single static hub shared by every component on the page.
 //
 // This package is the emission + versioning seam, mirroring gothiccore
-// (which owns gothic-core.js). It embeds three artifacts and emits them to the
+// (which owns gothic-core.js). It embeds two artifacts and emits them to the
 // project's public/ directory:
 //
 //	gothic-core.wasm       the prebuilt core module (from core.wasm, committed)
-//	gothic-core-exec.js    the wasm_exec shim the core instantiates through — the
-//	                       same TinyGo shim per-instance components use (committed)
 //	gothic-core-boot.js    a tiny loader that instantiates + runs the core once
-//	                       per page, generated here so its content-hash tracks the
-//	                       core and exec hashes
+//	                       per page, generated here so its content-hash tracks
+//	                       the core wasm and the shared exec shim
+//
+// The exec shim is NOT duplicated here — it is served from wasmexec (the same
+// wasm_exec.js per-instance components use), avoiding the earlier 17,732 B
+// duplicate download.
 //
 // It is a leaf package (no internal deps) so BOTH the routes bootstrap layer and
 // the wasm build layer can import it without a dependency cycle — same shape as
@@ -20,9 +22,9 @@
 //
 // # Regenerating the core artifacts (maintainers only)
 //
-// The committed core.wasm + gothic-core-exec.js are rebuilt ONLY when the core's
-// source (wasm/core-runtime), one of its dependencies, or the pinned TinyGo
-// version changes. Run:
+// The committed core.wasm is rebuilt ONLY when the core's source
+// (wasm/core-runtime), one of its dependencies, or the pinned TinyGo version
+// changes. Run:
 //
 //	go generate ./corewasm
 //
@@ -43,7 +45,6 @@
 package corewasm
 
 //go:generate sh -c "${DOLLAR}{GOTHIC_TINYGO:-tinygo} build -no-debug -opt=z -target wasm -gc precise -o core.wasm github.com/gothicframework/core/wasm/core-runtime"
-//go:generate sh -c "cp ../wasmexec/wasm_exec_stock.js gothic-core-exec.js"
 
 import (
 	"bytes"
@@ -52,6 +53,8 @@ import (
 	"encoding/hex"
 	"os"
 	"path/filepath"
+
+	"github.com/gothicframework/core/wasmexec"
 )
 
 // coreWASM is the prebuilt full-Go core module. Committed as an artifact and
@@ -61,19 +64,15 @@ import (
 //go:embed core.wasm
 var coreWASM []byte
 
-// execJS is the wasm_exec shim the core instantiates through, version-matched to
-// the toolchain that built core.wasm (regenerated alongside it). Emitted as
-// public/gothic-core-exec.js. It is loaded under its OWN __gothicGoClasses slot
-// so the core's `Go` instance stays independent of the one per-instance
-// components boot from.
-//
-//go:embed gothic-core-exec.js
-var execJS []byte
+// The wasm_exec shim the core instantiates through is served from the shared
+// /_gothic/wasm_exec.js — the same file per-instance components load. Both use
+// the same __gothicGoClasses slot because the slot holds the Go constructor
+// function (not an instance), and each party creates its own Go instance via
+// new GoCls().
 
 // Emitted public basenames.
 const (
 	WASMFileName = "gothic-core.wasm"
-	ExecFileName = "gothic-core-exec.js"
 	BootFileName = "gothic-core-boot.js"
 )
 
@@ -83,12 +82,12 @@ func hash16(b []byte) string {
 	return hex.EncodeToString(sum[:])[:16]
 }
 
-// coreHash / execHash content-hash the two binary artifacts; they become the
-// ?v= cache-busters the boot loader uses to fetch them, so a framework upgrade
-// that changes either binary invalidates the browser cache automatically while
-// an unchanged core stays immutably cached.
+// coreHash content-hashes the wasm binary; it becomes the ?v= cache-buster the
+// boot loader uses to fetch the module, so a framework upgrade that changes the
+// core invalidates the browser cache automatically while an unchanged core stays
+// immutably cached. The exec shim is served from wasmexec.Shim and its content
+// hash comes from wasmexec.Version().
 var coreHash = hash16(coreWASM)
-var execHash = hash16(execJS)
 
 // bootJS is the loader referenced once by the layout <head>. It loads the
 // version-matched exec shim into its own __gothicGoClasses slot (coexisting with
@@ -105,17 +104,18 @@ var execHash = hash16(execJS)
 // loader's OWN content — and therefore its hash — changes whenever either binary
 // changes.
 var bootJS = "// gothic-core-boot.js — boots the Gothic full-Go static core once per page.\n" +
-	"// Loaded once from the layout <head>. Instantiates public/gothic-core.wasm through\n" +
-	"// its own wasm_exec slot so the standard-Go `Go` constructor coexists with TinyGo\n" +
-	"// components. A __gothicCoreBooting latch guards against a double boot; it is CLEARED\n" +
-	"// on exec-load or instantiate failure so a later attempt (e.g. an HTMX fragment) can\n" +
-	"// retry rather than wedge the page. Interpreted by nothing but the browser.\n" +
+	"// Loaded once from the layout <head>. Instantiates gothic-core.wasm through the\n" +
+	"// same wasm_exec.js shim that per-instance TinyGo components use — both load the\n" +
+	"// Go constructor from the same __gothicGoClasses slot and create independent\n" +
+	"// instances via new GoCls(). A __gothicCoreBooting latch guards against a double\n" +
+	"// boot; it is CLEARED on exec-load or instantiate failure so a later attempt\n" +
+	"// (e.g. an HTMX fragment) can retry rather than wedge the page.\n" +
 	"(function(){\n" +
 	"    if(window.__gothicCoreBooting)return;\n" +
 	"    window.__gothicCoreBooting=1;\n" +
-	"    var EXEC='/_gothic/" + ExecFileName + "?v=" + execHash + "';\n" +
+	"    var EXEC='/_gothic/wasm_exec.js?v=" + wasmexec.Version() + "';\n" +
 	"    var CORE='/_gothic/" + WASMFileName + "?v=" + coreHash + "';\n" +
-	"    var SLOT='" + ExecFileName + "';\n" +
+	"    var SLOT='wasm_exec.js';\n" +
 	"    // Download and compile the module NOW, in parallel with the exec shim below,\n" +
 	"    // so the two round trips overlap instead of chaining. Compilation needs no\n" +
 	"    // import object, so only the final instantiate has to wait for the shim.\n" +
@@ -147,13 +147,14 @@ var bootJS = "// gothic-core-boot.js — boots the Gothic full-Go static core on
 	"    document.head.appendChild(s);\n" +
 	"})();\n"
 
-// bootHash content-hashes the boot loader. Because bootJS embeds coreHash and
-// execHash, bootHash changes whenever the core or the exec shim changes, so the
-// single ?v= the layout carries transitively cache-busts all three artifacts.
+// bootHash content-hashes the boot loader. Because bootJS embeds the core wasm
+// hash and the exec shim version, bootHash changes whenever the core wasm OR
+// the exec shim changes, so the single ?v= the layout carries transitively
+// cache-busts all artifacts.
 var bootHash = hash16([]byte(bootJS))
 
 // Version returns the boot loader's content hash — the ?v= cache-buster the
-// layout <head> references. One hash covers all three artifacts (see bootHash).
+// layout <head> references. One hash covers all served artifacts.
 func Version() string { return bootHash }
 
 // CoreWASM returns the prebuilt full-Go core module bytes (gothic-core.wasm).
@@ -161,18 +162,13 @@ func Version() string { return bootHash }
 // (via the /_gothic/ route) instead of copying it into the project's public/.
 func CoreWASM() []byte { return coreWASM }
 
-// ExecJS returns the standard-Go wasm_exec shim bytes (gothic-core-exec.js),
-// version-matched to the toolchain that built core.wasm. Served from /_gothic/.
-func ExecJS() []byte { return execJS }
-
 // BootJS returns the generated boot loader bytes (gothic-core-boot.js). Served
 // from /_gothic/.
 func BootJS() []byte { return []byte(bootJS) }
 
-// CoreHash / ExecHash return the content hashes of the two binary artifacts —
-// the ?v= cache-busters the boot loader embeds when fetching them.
+// CoreHash returns the content hash of the core wasm binary — the ?v=
+// cache-buster the boot loader embeds when fetching it.
 func CoreHash() string { return coreHash }
-func ExecHash() string { return execHash }
 
 // BootAssetPath is the URL the layout references, including the content-hash
 // cache-buster: /_gothic/gothic-core-boot.js?v=<bootHash>. Served from the
@@ -197,7 +193,7 @@ func writeIfChanged(path string, data []byte) error {
 	return os.WriteFile(path, data, 0644)
 }
 
-// Write emits the three static-core artifacts into publicDir (creating it if
+// Write emits the two static-core artifacts into publicDir (creating it if
 // needed). Called at `gothic init` (to seed the files so the layout reference
 // resolves on the first render) and on every build (so existing projects pick up
 // a new core when the CLI is upgraded).
@@ -205,15 +201,14 @@ func writeIfChanged(path string, data []byte) error {
 // Emission is IDEMPOTENT and mtime-stable: each file is rewritten only when its
 // content changed. The core is NEVER recompiled here — it is copied from the
 // embedded, prebuilt artifact — so it is not part of the GenerateAll per-page
-// rebuild set and a hot-reload cycle leaves all three files' mtimes unchanged.
+// rebuild set and a hot-reload cycle leaves both files' mtimes unchanged. The
+// exec shim (wasm_exec.js) is served from the /_gothic/ embed and is no longer
+// emitted here.
 func Write(publicDir string) error {
 	if err := os.MkdirAll(publicDir, 0755); err != nil {
 		return err
 	}
 	if err := writeIfChanged(filepath.Join(publicDir, WASMFileName), coreWASM); err != nil {
-		return err
-	}
-	if err := writeIfChanged(filepath.Join(publicDir, ExecFileName), execJS); err != nil {
 		return err
 	}
 	if err := writeIfChanged(filepath.Join(publicDir, BootFileName), []byte(bootJS)); err != nil {

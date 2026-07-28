@@ -3,8 +3,6 @@ package helpers
 import (
 	"bytes"
 	"fmt"
-	"math/rand"
-	"strconv"
 
 	"github.com/gothicframework/core/gothiccore"
 	"github.com/gothicframework/core/wasmexec"
@@ -30,22 +28,16 @@ import (
 // Duplicate-component disambiguation:
 // Two renders of the same component (same wasmName) used to emit the SAME
 // data-gothic-wasm attribute. The client-side bootstrap then resolved every
-// instance to the FIRST matching wrapper in the DOM. We now stamp each render
-// with a unique data-gothic-inst="<hex>" and thread that ID into the bootstrap
-// script so the JS selector targets one specific wrapper.
+// instance to the FIRST matching wrapper in the DOM. We now generate a unique
+// data-gothic-inst="<hex>" at runtime inside the browser bootstrap JS (via
+// Math.random()), making it immune to HTTP response reuse from CDNs, caches,
+// or WebKit's identical-GET dedup. The fragment fallback selector uses
+// :not([data-gothic-scope]) to target the first uninitialized wrapper.
 
-// newInstanceID returns a per-render opaque identifier used to disambiguate
-// multiple wrappers that share the same wasmName on the same page.
-func newInstanceID() string {
-	return strconv.FormatUint(uint64(rand.Uint32()), 16)
-}
-
-// injectGothicScope marks the scope boundary for a WASM instance and stamps a
-// per-render instance id on the wrapper. The instance id is returned so the
-// bootstrap script can be wired to this specific wrapper.
-//
-// Returns: (modifiedHTML, instanceID).
-func injectGothicScope(html []byte, wasmName string) ([]byte, string) {
+// injectGothicScope marks the scope boundary for a WASM instance by stamping
+// data-gothic-wasm on the wrapper. The per-instance data-gothic-inst is now set
+// by the browser-side bootstrap JS at runtime, not by the server.
+func injectGothicScope(html []byte, wasmName string) []byte {
 	return injectGothicScopeDurable(html, wasmName, "")
 }
 
@@ -62,26 +54,27 @@ func injectGothicScope(html []byte, wasmName string) ([]byte, string) {
 // declare the attribute directly in their own templ markup (the JS resolver
 // __gothicDurableKey falls back to a scoped descendant), in which case no server
 // stamping is needed at all.
-func injectGothicScopeDurable(html []byte, wasmName, durableKey string) ([]byte, string) {
-	inst := newInstanceID()
-	attr := `data-gothic-wasm="` + wasmName + `" data-gothic-inst="` + inst + `"`
+func injectGothicScopeDurable(html []byte, wasmName, durableKey string) []byte {
+	attr := `data-gothic-wasm="` + wasmName + `"`
 	if durableKey != "" {
 		attr += ` data-gothic-durable-key="` + durableKey + `"`
 	}
 	if bytes.Contains(html, []byte("<body")) {
-		return bytes.Replace(html, []byte("<body"), []byte("<body "+attr), 1), inst
+		return bytes.Replace(html, []byte("<body"), []byte("<body "+attr), 1)
 	}
 	var buf bytes.Buffer
 	buf.WriteString(`<div ` + attr + ` style="display:contents">`)
 	buf.Write(html)
 	buf.WriteString(`</div>`)
-	return buf.Bytes(), inst
+	return buf.Bytes()
 }
 
-// injectWasmBootstrap injects the WASM loader script. The instance id passed in
-// is baked into the JS selector so each render attaches its module to its own
-// wrapper, not the first matching wrapper on the page.
-func injectWasmBootstrap(html []byte, wasmName string, compression CompressionMethod, compiler WasmCompiler, inst string, multiplexed bool) []byte {
+// injectWasmBootstrap injects the WASM loader script. The per-wrapper instance
+// id (data-gothic-inst) is generated inside the bootstrap JS at runtime using
+// Math.random(), so identical HTTP responses from a CDN or cache do not collide
+// on the same selector. The fragment selector uses :not([data-gothic-scope]) to
+// target the first uninitialized wrapper with the matching wasm name.
+func injectWasmBootstrap(html []byte, wasmName string, compression CompressionMethod, compiler WasmCompiler, multiplexed bool) []byte {
 	isFullPage := bytes.Contains(html, []byte("</body>"))
 
 	var findEl string
@@ -90,7 +83,7 @@ func injectWasmBootstrap(html []byte, wasmName string, compression CompressionMe
 			`(function(){var b=document.body;if(b)b.setAttribute('data-gothic-wasm','` + wasmName + `');return b;})())`
 	} else {
 		findEl = `(document.currentScript&&document.currentScript.previousElementSibling)` +
-			`||document.querySelector('[data-gothic-wasm="` + wasmName + `"][data-gothic-inst="` + inst + `"]')`
+			`||document.querySelector('[data-gothic-wasm="` + wasmName + `"]:not([data-gothic-scope])')`
 	}
 
 	ext := ".wasm.gz"
@@ -137,23 +130,29 @@ func wasmExecPath(compiler WasmCompiler) string {
 	return wasmexec.AssetPath()
 }
 
-// injectWasmEnvelope is a convenience helper that owns the instance id for one
-// render: it stamps the wrapper, then bakes the same id into the bootstrap.
+// injectWasmEnvelope stamps the wrapper and appends the bootstrap script.
+// The per-instance data-gothic-inst is now generated inside the JS bootstrap
+// at runtime, so the envelope no longer threads a server-generated id.
 func injectWasmEnvelope(html []byte, wasmName string, compression CompressionMethod, compiler WasmCompiler, multiplexed bool) []byte {
-	scoped, inst := injectGothicScope(html, wasmName)
-	return injectWasmBootstrap(scoped, wasmName, compression, compiler, inst, multiplexed)
+	scoped := injectGothicScope(html, wasmName)
+	return injectWasmBootstrap(scoped, wasmName, compression, compiler, multiplexed)
 }
 
-// perInstanceHeadFmt opens the per-instance bootstrap: it stamps the scope id and
-// defensively ensures gothic-core.js is loaded before running the module body.
-// The shared globals live in gothic-core.js (loaded once by the layout); this
-// _ensureCore guard only fetches it when a fragment is somehow rendered before
-// the layout installed it. Verbs: wn, findEl, gothic-core cache-buster hash.
+// perInstanceHeadFmt opens the per-instance bootstrap: it generates a per-render
+// instance id (data-gothic-inst) in the browser via Math.random() (immune to HTTP
+// response reuse from CDNs, caches, or WebKit's identical-GET dedup), stamps
+// data-gothic-scope on the wrapper, and defensively ensures gothic-core.js is
+// loaded before running the module body. The shared globals live in gothic-core.js
+// (loaded once by the layout); this _ensureCore guard only fetches it when a
+// fragment is somehow rendered before the layout installed it.
+// Verbs: wn, findEl, gothic-core cache-buster hash.
 const perInstanceHeadFmt = `<script>
 (function(){
     var wn='%s';
+    var inst=(Math.random()*0xFFFFFFFF>>>0).toString(16).padStart(8,'0');
     var el=(%s);
     if(!el)return;
+    el.setAttribute('data-gothic-inst',inst);
     var id=wn+'-'+(Math.random()*0xFFFFFFFF>>>0).toString(16).padStart(8,'0');
     el.setAttribute('data-gothic-scope',id);
     function _ensureCore(cb){
