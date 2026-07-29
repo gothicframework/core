@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -110,7 +111,7 @@ func (config *RouteConfig[T]) RegisterRoute(r chi.Router, httpPath string, compo
 			return &wasmInjectedComponent{inner: component(props), wasmName: wasmName, compression: compression, compiler: compiler, multiplexed: multiplexed}
 		}
 	}
-	handler := config.resolveHandler(wrapped)
+	handler := config.resolveHandler(httpPath, wrapped)
 
 	switch config.HttpMethod {
 	case GET:
@@ -145,16 +146,19 @@ func (c *wasmInjectedComponent) Render(ctx context.Context, w io.Writer) error {
 	return err
 }
 
-func (config *RouteConfig[T]) resolveHandler(component func(T) templ.Component) http.HandlerFunc {
+// httpPath is threaded down instead of read from config.Path at request time:
+// DefaultConfig is a single shared value reused by every page that declares no
+// config of its own, so its Path field holds whatever route registered last.
+func (config *RouteConfig[T]) resolveHandler(httpPath string, component func(T) templ.Component) http.HandlerFunc {
 	switch config.Type {
 	case STATIC:
 		store := getGlobalCacheStore()
 		cacheType := getGlobalCacheType()
-		return config.staticHandler(component, store, cacheType)
+		return config.staticHandler(httpPath, component, store, cacheType)
 	case ISR:
 		store := getGlobalCacheStore()
 		cacheType := getGlobalCacheType()
-		return config.isrHandler(component, store, cacheType)
+		return config.isrHandler(httpPath, component, store, cacheType)
 	default:
 		return config.dynamicHandler(component)
 	}
@@ -162,16 +166,30 @@ func (config *RouteConfig[T]) resolveHandler(component func(T) templ.Component) 
 
 func (config *RouteConfig[T]) dynamicHandler(component func(T) templ.Component) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		config.Render(r, w, component(config.Middleware(w, r)))
+		// Middleware runs via statusCapture; if it wrote >= 300, abort without rendering.
+		sc := &statusCapture{ResponseWriter: w}
+		middlewareResult := config.Middleware(sc, r)
+		if sc.Status() >= 300 {
+			return // DYNAMIC: no warning, no render, no cache
+		}
+		config.Render(r, w, component(middlewareResult))
 	}
 }
 
-func (config *RouteConfig[T]) staticHandler(component func(T) templ.Component, store CacheStore, cacheType CacheType) http.HandlerFunc {
+func (config *RouteConfig[T]) staticHandler(httpPath string, component func(T) templ.Component, store CacheStore, cacheType CacheType) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		// CACHE_CONTROL_HEADERS mode: set headers and render directly (no store caching)
+		// CACHE_CONTROL_HEADERS mode: set headers, run middleware, render directly (no store caching)
 		if cacheType == CACHE_CONTROL_HEADERS {
 			w.Header().Set("Cache-Control", "max-age=31536000")
-			config.Render(r, w, component(config.Middleware(w, r)))
+			sc := &statusCapture{ResponseWriter: w}
+			middlewareResult := config.Middleware(sc, r)
+			if sc.Status() >= 300 {
+				if sc.Status() >= 400 {
+					warnStaticAuthRejected(httpPath)
+				}
+				return
+			}
+			config.Render(r, w, component(middlewareResult))
 			return
 		}
 
@@ -183,25 +201,46 @@ func (config *RouteConfig[T]) staticHandler(component func(T) templ.Component, s
 			return
 		}
 
-		// Cache miss: render to buffer, cache, and write response
-		middlewareResult := config.Middleware(w, r)
+		// Cache miss: run middleware via statusCapture; abort on >= 300.
+		sc := &statusCapture{ResponseWriter: w}
+		middlewareResult := config.Middleware(sc, r)
+		if sc.Status() >= 300 {
+			if sc.Status() >= 400 {
+				warnStaticAuthRejected(httpPath)
+			}
+			return
+		}
+
+		// Render to buffer
 		var buf bytes.Buffer
-		component(middlewareResult).Render(r.Context(), &buf)
+		if err := component(middlewareResult).Render(r.Context(), &buf); err != nil {
+			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+			// NOT cached on render error
+			return
+		}
 		store.Set(key, buf.Bytes(), 0)
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Write(buf.Bytes())
 	}
 }
 
-func (config *RouteConfig[T]) isrHandler(component func(T) templ.Component, store CacheStore, cacheType CacheType) http.HandlerFunc {
+func (config *RouteConfig[T]) isrHandler(httpPath string, component func(T) templ.Component, store CacheStore, cacheType CacheType) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		// CACHE_CONTROL_HEADERS mode: set headers and render directly (no store caching)
+		// CACHE_CONTROL_HEADERS mode: set headers, run middleware, render directly (no store caching)
 		if cacheType == CACHE_CONTROL_HEADERS {
 			w.Header().Set("Cache-Control", fmt.Sprintf(
 				"max-age=%v, stale-while-revalidate=%v, stale-if-error=%v",
 				config.RevalidateInSec, config.RevalidateInSec, config.RevalidateInSec,
 			))
-			config.Render(r, w, component(config.Middleware(w, r)))
+			sc := &statusCapture{ResponseWriter: w}
+			middlewareResult := config.Middleware(sc, r)
+			if sc.Status() >= 300 {
+				if sc.Status() >= 400 {
+					warnStaticAuthRejected(httpPath)
+				}
+				return
+			}
+			config.Render(r, w, component(middlewareResult))
 			return
 		}
 
@@ -213,11 +252,24 @@ func (config *RouteConfig[T]) isrHandler(component func(T) templ.Component, stor
 			return
 		}
 
-		// Cache miss: render to buffer, cache with TTL, and write response
-		ttl := time.Duration(config.RevalidateInSec) * time.Second
-		middlewareResult := config.Middleware(w, r)
+		// Cache miss: run middleware via statusCapture; abort on >= 300.
+		sc := &statusCapture{ResponseWriter: w}
+		middlewareResult := config.Middleware(sc, r)
+		if sc.Status() >= 300 {
+			if sc.Status() >= 400 {
+				warnStaticAuthRejected(httpPath)
+			}
+			return
+		}
+
+		// Render to buffer (with TTL for ISR)
 		var buf bytes.Buffer
-		component(middlewareResult).Render(r.Context(), &buf)
+		if err := component(middlewareResult).Render(r.Context(), &buf); err != nil {
+			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+			// NOT cached on render error
+			return
+		}
+		ttl := time.Duration(config.RevalidateInSec) * time.Second
 		store.Set(key, buf.Bytes(), ttl)
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Write(buf.Bytes())
@@ -321,8 +373,11 @@ func (config *ApiRouteConfig) apiStaticHandler(fn func(http.ResponseWriter, *htt
 			ContentType: rec.Header().Get("Content-Type"),
 			Body:        rec.Body.Bytes(),
 		}
-		if encoded, err := encodeCachedAPIResponse(resp); err == nil {
-			store.Set(key, encoded, 0)
+		// Cache only when status < 500: 5xx is transient, 4xx stays cacheable.
+		if resp.StatusCode < 500 {
+			if encoded, err := encodeCachedAPIResponse(resp); err == nil {
+				store.Set(key, encoded, 0)
+			}
 		}
 		replayAPIResponse(w, resp)
 	}
@@ -357,8 +412,11 @@ func (config *ApiRouteConfig) apiISRHandler(fn func(http.ResponseWriter, *http.R
 			ContentType: rec.Header().Get("Content-Type"),
 			Body:        rec.Body.Bytes(),
 		}
-		if encoded, err := encodeCachedAPIResponse(resp); err == nil {
-			store.Set(key, encoded, ttl)
+		// Cache only when status < 500: 5xx is transient, 4xx stays cacheable.
+		if resp.StatusCode < 500 {
+			if encoded, err := encodeCachedAPIResponse(resp); err == nil {
+				store.Set(key, encoded, ttl)
+			}
 		}
 		replayAPIResponse(w, resp)
 	}
@@ -370,6 +428,7 @@ type RouteTemplate struct {
 	PackageName       string
 	ConfigPackageName string
 	HttpPath          string
+	QuotedHttpPath    string
 	OriginFile        string
 }
 
@@ -472,6 +531,7 @@ func (helper *FileBasedRouteHelper) collectApiRoutesInfo(goModName string) error
 			}
 
 			route.HttpPath = helper.normalizeHttpPath(path)
+			route.QuotedHttpPath = strconv.Quote(route.HttpPath)
 			if route.FunctionName != "" {
 				helper.TemplateInfo.ApiRoutes = append(helper.TemplateInfo.ApiRoutes, route)
 			}
@@ -526,6 +586,7 @@ func (helper *FileBasedRouteHelper) collectComponentsInfo(goModName string) erro
 			}
 
 			route.HttpPath = helper.normalizeHttpPath(path)
+			route.QuotedHttpPath = strconv.Quote(route.HttpPath)
 			if route.FunctionName != "" {
 				helper.TemplateInfo.Routes = append(helper.TemplateInfo.Routes, route)
 			}
@@ -580,6 +641,7 @@ func (helper *FileBasedRouteHelper) collectPageInfo(goModName string) error {
 			}
 
 			route.HttpPath = helper.normalizeHttpPath(path)
+			route.QuotedHttpPath = strconv.Quote(route.HttpPath)
 			if route.FunctionName != "" {
 				helper.TemplateInfo.Routes = append(helper.TemplateInfo.Routes, route)
 			}

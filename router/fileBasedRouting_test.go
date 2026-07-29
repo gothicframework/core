@@ -1,11 +1,16 @@
 package helpers
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"strings"
+	"sync"
 	"testing"
 
 	"github.com/a-h/templ"
@@ -700,4 +705,655 @@ func TestRegisterRouteHTTPMethods(t *testing.T) {
 	}
 
 	resetGlobalCache()
+}
+
+// errorComponent returns a templ.Component that always fails.
+func errorComponent() templ.Component {
+	return templ.ComponentFunc(func(ctx context.Context, w io.Writer) error {
+		return fmt.Errorf("simulated render failure")
+	})
+}
+
+// --- Middleware abort semantics -------------------------------------------------
+
+// TestStaticMiddlewareAbortNotRendered asserts that when the middleware writes
+// status >= 300 on a STATIC route, the component is NOT rendered — only the
+// middleware's own response reaches the client.
+func TestStaticMiddlewareAbortNotRendered(t *testing.T) {
+	t.Run("IN_MEMORY", func(t *testing.T) {
+		resetGlobalCache()
+		InitCache(IN_MEMORY, nil)
+		defer resetGlobalCache()
+
+		config := RouteConfig[string]{
+			Type:       STATIC,
+			HttpMethod: GET,
+			Middleware: func(w http.ResponseWriter, r *http.Request) string {
+				if r.URL.Query().Get("auth") != "1" {
+					http.Error(w, "Forbidden", http.StatusForbidden)
+					return ""
+				}
+				return "authorized"
+			},
+		}
+
+		r := chi.NewRouter()
+		config.RegisterRoute(r, "/test", func(props string) templ.Component {
+			return mockComponent("<main>component</main>")
+		})
+
+		req := httptest.NewRequest("GET", "/test", nil)
+		rec := httptest.NewRecorder()
+		r.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusForbidden {
+			t.Errorf("expected 403, got %d", rec.Code)
+		}
+		// The component's <main> marker must NOT appear — only the MW body.
+		if rec.Body.String() != "Forbidden\n" {
+			t.Errorf("expected MW body 'Forbidden\\n', got %q", rec.Body.String())
+		}
+	})
+
+	t.Run("CACHE_CONTROL_HEADERS", func(t *testing.T) {
+		resetGlobalCache()
+		InitCache(CACHE_CONTROL_HEADERS, nil)
+		defer resetGlobalCache()
+
+		config := RouteConfig[string]{
+			Type:       STATIC,
+			HttpMethod: GET,
+			Middleware: func(w http.ResponseWriter, r *http.Request) string {
+				http.Error(w, "Unauthorized", http.StatusUnauthorized)
+				return ""
+			},
+		}
+
+		r := chi.NewRouter()
+		config.RegisterRoute(r, "/test-cc", func(props string) templ.Component {
+			return mockComponent("<main>component</main>")
+		})
+
+		req := httptest.NewRequest("GET", "/test-cc", nil)
+		rec := httptest.NewRecorder()
+		r.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusUnauthorized {
+			t.Errorf("expected 401, got %d", rec.Code)
+		}
+		if rec.Body.String() != "Unauthorized\n" {
+			t.Errorf("expected MW body 'Unauthorized\\n', got %q", rec.Body.String())
+		}
+	})
+}
+
+// TestStaticMiddlewareSkippedOnCacheHit asserts that the middleware does NOT run
+// on a cache hit (STATIC/ISR with store-backed cache). This is THE CONTRACT:
+// middleware is a props-loader, not an auth hook.
+func TestStaticMiddlewareSkippedOnCacheHit(t *testing.T) {
+	resetGlobalCache()
+	InitCache(IN_MEMORY, nil)
+	defer resetGlobalCache()
+
+	callCount := 0
+
+	// The middleware would reject on >1 call, but after a cache hit it must not run.
+	config := RouteConfig[string]{
+		Type:       STATIC,
+		HttpMethod: GET,
+		Middleware: func(w http.ResponseWriter, r *http.Request) string {
+			callCount++
+			if callCount > 1 {
+				http.Error(w, "Must not be called", http.StatusInternalServerError)
+				return ""
+			}
+			return "first-call"
+		},
+	}
+
+	r := chi.NewRouter()
+	config.RegisterRoute(r, "/cached", func(props string) templ.Component {
+		return mockComponent("<p>" + props + "</p>")
+	})
+
+	// First request: miss, MW runs, returns 200
+	req := httptest.NewRequest("GET", "/cached", nil)
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d", rec.Code)
+	}
+	if rec.Body.String() != "<p>first-call</p>" {
+		t.Errorf("expected '<p>first-call</p>', got %q", rec.Body.String())
+	}
+
+	// Second request: cache hit, MW must NOT run
+	req2 := httptest.NewRequest("GET", "/cached", nil)
+	rec2 := httptest.NewRecorder()
+	r.ServeHTTP(rec2, req2)
+
+	if callCount != 1 {
+		t.Errorf("expected MW called once (cached), got %d", callCount)
+	}
+	if rec2.Code != http.StatusOK {
+		t.Errorf("expected 200 on cache hit, got %d", rec2.Code)
+	}
+	if rec2.Body.String() != "<p>first-call</p>" {
+		t.Errorf("cache hit: expected '<p>first-call</p>', got %q", rec2.Body.String())
+	}
+}
+
+// TestStaticMiddlewareAbortNotCached asserts that a middleware abort (>= 300)
+// is NOT cached. A subsequent request that succeeds IS cached.
+func TestStaticMiddlewareAbortNotCached(t *testing.T) {
+	resetGlobalCache()
+	InitCache(IN_MEMORY, nil)
+	defer resetGlobalCache()
+
+	callCount := 0
+
+	config := RouteConfig[string]{
+		Type:       STATIC,
+		HttpMethod: GET,
+		Middleware: func(w http.ResponseWriter, r *http.Request) string {
+			callCount++
+			if callCount == 1 {
+				http.Error(w, "Rejected", http.StatusForbidden)
+				return ""
+			}
+			return "accepted"
+		},
+	}
+
+	r := chi.NewRouter()
+	config.RegisterRoute(r, "/test", func(props string) templ.Component {
+		return mockComponent("<main>" + props + "</main>")
+	})
+
+	// Request 1: MW rejects with 403 → NOT cached
+	req := httptest.NewRequest("GET", "/test", nil)
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("expected 403, got %d", rec.Code)
+	}
+	if rec.Body.String() != "Rejected\n" {
+		t.Errorf("expected 'Rejected\\n', got %q", rec.Body.String())
+	}
+
+	// Request 2: MW runs again (not cached), returns 200 → cached
+	req2 := httptest.NewRequest("GET", "/test", nil)
+	rec2 := httptest.NewRecorder()
+	r.ServeHTTP(rec2, req2)
+
+	if callCount != 2 {
+		t.Errorf("expected MW called 2 times (not cached), got %d", callCount)
+	}
+	if rec2.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d", rec2.Code)
+	}
+	if rec2.Body.String() != "<main>accepted</main>" {
+		t.Errorf("expected '<main>accepted</main>', got %q", rec2.Body.String())
+	}
+
+	// Request 3: cache hit from request 2
+	req3 := httptest.NewRequest("GET", "/test", nil)
+	rec3 := httptest.NewRecorder()
+	r.ServeHTTP(rec3, req3)
+
+	if callCount != 2 {
+		t.Errorf("expected MW still called 2 times (3rd cached), got %d", callCount)
+	}
+	if rec3.Body.String() != "<main>accepted</main>" {
+		t.Errorf("cache hit: expected '<main>accepted</main>', got %q", rec3.Body.String())
+	}
+}
+
+// TestStaticAbortWarnsYellowOnce asserts that the first >= 400 abort on a STATIC
+// route prints a single yellow ANSI warning to stderr, and subsequent aborts
+// for the same path are silent.
+func TestStaticAbortWarnsYellowOnce(t *testing.T) {
+	// Reset the warn map for a clean test.
+	warnStaticAuthOnce = sync.Map{}
+
+	// Capture stderr.
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldStderr := os.Stderr
+	os.Stderr = writer
+
+	resetGlobalCache()
+	InitCache(IN_MEMORY, nil)
+
+	config := RouteConfig[string]{
+		Type:       STATIC,
+		HttpMethod: GET,
+		Middleware: func(w http.ResponseWriter, r *http.Request) string {
+			http.Error(w, "Forbidden", http.StatusForbidden)
+			return ""
+		},
+	}
+
+	r := chi.NewRouter()
+	config.RegisterRoute(r, "/warn-test", func(props string) templ.Component {
+		return mockComponent("<main>content</main>")
+	})
+
+	// Two 403 requests for the same path.
+	for i := 0; i < 2; i++ {
+		req := httptest.NewRequest("GET", "/warn-test", nil)
+		rec := httptest.NewRecorder()
+		r.ServeHTTP(rec, req)
+	}
+
+	writer.Close()
+	warnOutput, _ := io.ReadAll(reader)
+	os.Stderr = oldStderr
+
+	lines := strings.Split(string(warnOutput), "\n")
+	var warnLines int
+	for _, line := range lines {
+		if strings.Contains(line, "\033[33m") {
+			warnLines++
+		}
+	}
+	if warnLines != 1 {
+		t.Errorf("expected exactly 1 yellow warn line, got %d; stderr:\n%s", warnLines, string(warnOutput))
+	}
+	// The warning has to name the route and point at the fix, or it teaches nothing.
+	if !strings.Contains(string(warnOutput), "/warn-test") {
+		t.Errorf("warning does not name the route path; stderr:\n%s", string(warnOutput))
+	}
+	if !strings.Contains(string(warnOutput), "DYNAMIC") {
+		t.Errorf("warning does not point at DYNAMIC as the fix; stderr:\n%s", string(warnOutput))
+	}
+}
+
+// TestStaticRedirectAbort asserts that a 302 redirect from middleware stops
+// rendering (no component marker), preserves the Location header, and does NOT
+// trigger the static-auth warning (302 < 400).
+func TestStaticRedirectAbort(t *testing.T) {
+	warnStaticAuthOnce = sync.Map{}
+
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldStderr := os.Stderr
+	os.Stderr = writer
+
+	resetGlobalCache()
+	InitCache(IN_MEMORY, nil)
+	defer func() {
+		resetGlobalCache()
+		writer.Close()
+		os.Stderr = oldStderr
+	}()
+
+	config := RouteConfig[string]{
+		Type:       STATIC,
+		HttpMethod: GET,
+		Middleware: func(w http.ResponseWriter, r *http.Request) string {
+			http.Redirect(w, r, "/login", http.StatusFound)
+			return ""
+		},
+	}
+
+	r := chi.NewRouter()
+	config.RegisterRoute(r, "/protected", func(props string) templ.Component {
+		return mockComponent("<main>secret</main>")
+	})
+
+	req := httptest.NewRequest("GET", "/protected", nil)
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusFound {
+		t.Errorf("expected 302, got %d", rec.Code)
+	}
+	if loc := rec.Header().Get("Location"); loc != "/login" {
+		t.Errorf("expected Location: /login, got %q", loc)
+	}
+	// The component marker must NOT appear in the body.
+	if strings.Contains(rec.Body.String(), "<main>secret</main>") {
+		t.Errorf("component must not render after redirect, body: %q", rec.Body.String())
+	}
+
+	// Collect stderr — must contain no yellow warning (302 < 400).
+	writer.Close()
+	warnOutput, _ := io.ReadAll(reader)
+	os.Stderr = oldStderr
+
+	if strings.Contains(string(warnOutput), "\033[33m") {
+		t.Errorf("redirect abort must not produce a yellow warning, got: %s", string(warnOutput))
+	}
+}
+
+// TestDynamicMiddlewareAbort asserts that a DYNAMIC route with middleware
+// writing >= 300 aborts without rendering and without a yellow warning.
+func TestDynamicMiddlewareAbort(t *testing.T) {
+	warnStaticAuthOnce = sync.Map{}
+
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldStderr := os.Stderr
+	os.Stderr = writer
+
+	resetGlobalCache()
+	InitCache(IN_MEMORY, nil)
+	defer func() {
+		resetGlobalCache()
+		writer.Close()
+		os.Stderr = oldStderr
+	}()
+
+	config := RouteConfig[string]{
+		Type:       DYNAMIC,
+		HttpMethod: GET,
+		Middleware: func(w http.ResponseWriter, r *http.Request) string {
+			http.Error(w, "Forbidden", http.StatusForbidden)
+			return ""
+		},
+	}
+
+	r := chi.NewRouter()
+	config.RegisterRoute(r, "/dyn-protected", func(props string) templ.Component {
+		return mockComponent("<dynamic>content</dynamic>")
+	})
+
+	req := httptest.NewRequest("GET", "/dyn-protected", nil)
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("expected 403, got %d", rec.Code)
+	}
+	if rec.Body.String() != "Forbidden\n" {
+		t.Errorf("expected MW body 'Forbidden\\n', got %q", rec.Body.String())
+	}
+
+	// No yellow warning for DYNAMIC routes.
+	writer.Close()
+	warnOutput, _ := io.ReadAll(reader)
+	os.Stderr = oldStderr
+
+	if strings.Contains(string(warnOutput), "\033[33m") {
+		t.Errorf("DYNAMIC abort must not produce a yellow warning, got: %s", string(warnOutput))
+	}
+}
+
+// TestStaticRenderErrorReturns500 asserts that when the component render fails
+// on a cache miss, the response is 500 and the cache is NOT populated.
+func TestStaticRenderErrorReturns500(t *testing.T) {
+	resetGlobalCache()
+	InitCache(IN_MEMORY, nil)
+	defer resetGlobalCache()
+
+	config := RouteConfig[string]{
+		Type:       STATIC,
+		HttpMethod: GET,
+		Middleware: func(w http.ResponseWriter, r *http.Request) string {
+			return "props"
+		},
+	}
+
+	r := chi.NewRouter()
+	config.RegisterRoute(r, "/broken", func(props string) templ.Component {
+		return errorComponent()
+	})
+
+	// First request: render fails → 500, nothing cached
+	req := httptest.NewRequest("GET", "/broken", nil)
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Errorf("expected 500 on render error, got %d", rec.Code)
+	}
+
+	// Second request: nothing cached, so we hit the handler again.
+	req2 := httptest.NewRequest("GET", "/broken", nil)
+	rec2 := httptest.NewRecorder()
+	r.ServeHTTP(rec2, req2)
+
+	if rec2.Code != http.StatusInternalServerError {
+		t.Errorf("expected 500 on second render error, got %d", rec2.Code)
+	}
+}
+
+// --- API store.Set guard (5xx not cached, 4xx stays cacheable) ------------------
+
+// TestApiStaticCaches2xx asserts that a 200 API response is cached (handler
+// called only once).
+func TestApiStaticCaches2xx(t *testing.T) {
+	resetGlobalCache()
+	InitCache(IN_MEMORY, nil)
+	defer resetGlobalCache()
+
+	callCount := 0
+	config := ApiRouteConfig{
+		Type:       STATIC,
+		HttpMethod: GET,
+	}
+
+	r := chi.NewRouter()
+	config.RegisterRoute(r, "/api/ok", func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"ok":true}`))
+	})
+
+	// Two requests → handler runs once (second is cache hit)
+	for i := 0; i < 2; i++ {
+		req := httptest.NewRequest("GET", "/api/ok", nil)
+		rec := httptest.NewRecorder()
+		r.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Errorf("request %d: expected 200, got %d", i+1, rec.Code)
+		}
+	}
+
+	if callCount != 1 {
+		t.Errorf("expected handler called 1 time (cached), got %d", callCount)
+	}
+}
+
+// TestApiStaticCaches4xx asserts that a 404 API response IS cached (4xx stays
+// cacheable per spec).
+func TestApiStaticCaches4xx(t *testing.T) {
+	resetGlobalCache()
+	InitCache(IN_MEMORY, nil)
+	defer resetGlobalCache()
+
+	callCount := 0
+	config := ApiRouteConfig{
+		Type:       STATIC,
+		HttpMethod: GET,
+	}
+
+	r := chi.NewRouter()
+	config.RegisterRoute(r, "/api/notfound", func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		w.Write([]byte(`{"error":"not found"}`))
+	})
+
+	for i := 0; i < 2; i++ {
+		req := httptest.NewRequest("GET", "/api/notfound", nil)
+		rec := httptest.NewRecorder()
+		r.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusNotFound {
+			t.Errorf("request %d: expected 404, got %d", i+1, rec.Code)
+		}
+	}
+
+	if callCount != 1 {
+		t.Errorf("expected handler called 1 time (4xx cached), got %d", callCount)
+	}
+}
+
+// TestApiStaticDoesNotCache5xx asserts that a 500 API response is NOT cached
+// (handler runs on every request).
+func TestApiStaticDoesNotCache5xx(t *testing.T) {
+	resetGlobalCache()
+	InitCache(IN_MEMORY, nil)
+	defer resetGlobalCache()
+
+	callCount := 0
+	config := ApiRouteConfig{
+		Type:       STATIC,
+		HttpMethod: GET,
+	}
+
+	r := chi.NewRouter()
+	config.RegisterRoute(r, "/api/error", func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte(`{"error":"server error"}`))
+	})
+
+	for i := 0; i < 2; i++ {
+		req := httptest.NewRequest("GET", "/api/error", nil)
+		rec := httptest.NewRecorder()
+		r.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusInternalServerError {
+			t.Errorf("request %d: expected 500, got %d", i+1, rec.Code)
+		}
+	}
+
+	if callCount != 2 {
+		t.Errorf("expected handler called 2 times (5xx not cached), got %d", callCount)
+	}
+}
+
+// TestApiISRDoesNotCache5xx asserts that the same 5xx guard works for ISR API
+// routes.
+func TestApiISRDoesNotCache5xx(t *testing.T) {
+	resetGlobalCache()
+	InitCache(IN_MEMORY, nil)
+	defer resetGlobalCache()
+
+	callCount := 0
+	config := ApiRouteConfig{
+		Type:            ISR,
+		HttpMethod:      GET,
+		RevalidateInSec: 60,
+	}
+
+	r := chi.NewRouter()
+	config.RegisterRoute(r, "/api/isr-error", func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		w.Write([]byte(`{"error":"unavailable"}`))
+	})
+
+	for i := 0; i < 2; i++ {
+		req := httptest.NewRequest("GET", "/api/isr-error", nil)
+		rec := httptest.NewRecorder()
+		r.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusServiceUnavailable {
+			t.Errorf("request %d: expected 503, got %d", i+1, rec.Code)
+		}
+	}
+
+	if callCount != 2 {
+		t.Errorf("expected handler called 2 times (5xx not cached on ISR), got %d", callCount)
+	}
+}
+
+// --- statusCapture passthrough tests -------------------------------------------
+
+// TestStatusCapturePassthrough verifies that statusCapture properly delegates
+// Flusher and Unwrap (for ResponseController).
+func TestStatusCapturePassthrough(t *testing.T) {
+	// httptest.ResponseRecorder implements http.Flusher.
+	rec := httptest.NewRecorder()
+	sc := &statusCapture{ResponseWriter: rec}
+
+	// Verify Flusher is implemented (compile-time check via interface assertion).
+	var flusher http.Flusher = sc
+	flusher.Flush() // must not panic
+
+	// ResponseController reaches the recorder through Unwrap. httptest's recorder
+	// implements Flusher, so this must succeed — an error means the chain broke.
+	rc := http.NewResponseController(sc)
+	if err := rc.Flush(); err != nil {
+		t.Errorf("ResponseController.Flush through the wrapper: %v", err)
+	}
+
+	// WriteHeader captures first status.
+	sc.WriteHeader(http.StatusCreated)
+	if sc.Status() != http.StatusCreated {
+		t.Errorf("expected status 201, got %d", sc.Status())
+	}
+
+	// Write does not overwrite captured status.
+	sc.Write([]byte("hello"))
+	if sc.Status() != http.StatusCreated {
+		t.Errorf("Write must not change captured status, got %d", sc.Status())
+	}
+
+	// A fresh statusCapture with Write only gets 200.
+	sc2 := &statusCapture{ResponseWriter: httptest.NewRecorder()}
+	sc2.Write([]byte("data"))
+	if sc2.Status() != http.StatusOK {
+		t.Errorf("expected 200 after Write only, got %d", sc2.Status())
+	}
+
+	// Unwrap returns the underlying writer.
+	if sc.Unwrap() != rec {
+		t.Error("Unwrap should return the original ResponseWriter")
+	}
+}
+
+// hijackableRecorder is an httptest.ResponseRecorder that also implements
+// http.Hijacker, so the delegation path can be observed.
+type hijackableRecorder struct {
+	*httptest.ResponseRecorder
+	hijacked bool
+}
+
+func (h *hijackableRecorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	h.hijacked = true
+	return nil, nil, nil
+}
+
+// TestStatusCaptureHijack covers the passthrough that protects WebSocket and
+// other connection-upgrade middleware: a wrapper that swallows Hijack turns
+// those into a silent failure at runtime.
+func TestStatusCaptureHijack(t *testing.T) {
+	t.Run("delegates when the underlying writer supports it", func(t *testing.T) {
+		rec := &hijackableRecorder{ResponseRecorder: httptest.NewRecorder()}
+		sc := &statusCapture{ResponseWriter: rec}
+
+		var hijacker http.Hijacker = sc
+		if _, _, err := hijacker.Hijack(); err != nil {
+			t.Errorf("Hijack should delegate without error, got %v", err)
+		}
+		if !rec.hijacked {
+			t.Error("Hijack did not reach the underlying writer")
+		}
+	})
+
+	t.Run("reports an error when the underlying writer does not", func(t *testing.T) {
+		// httptest.ResponseRecorder is not an http.Hijacker.
+		sc := &statusCapture{ResponseWriter: httptest.NewRecorder()}
+		if _, _, err := sc.Hijack(); err == nil {
+			t.Error("Hijack must return an error when the underlying writer cannot hijack")
+		}
+	})
 }

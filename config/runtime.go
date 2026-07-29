@@ -76,4 +76,14 @@ type CacheConfig struct {
 	CacheFilesPath    string
 	Compression       bool
 	CompressionMethod CompressionMethod
+
+	// MaxEntries optionally bounds how many responses the IN_MEMORY backend
+	// holds, with least-recently-used eviction. The zero value keeps the
+	// store unbounded (the default): choose a bound when the app serves
+	// untrusted traffic, since the cache key includes the query string and
+	// unique query strings would otherwise grow memory without limit.
+	// High-cardinality sites (many parameterized pages) that need a bound
+	// are better served by the REDIS backend with maxmemory + allkeys-lru.
+	// Other backends ignore it.
+	MaxEntries int
 }

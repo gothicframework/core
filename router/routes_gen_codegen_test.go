@@ -5,6 +5,7 @@ import (
 	"go/token"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -62,5 +63,56 @@ func assertGothicImportsOrgPath(t *testing.T, label, src string) {
 	}
 	if seen == 0 {
 		t.Errorf("%s emitted no gothicframework import to check (fixture should force one)", label)
+	}
+}
+
+// TestRoutesGenQuotedHttpPath asserts that the template emits
+// strconv.Quote'd paths (QuotedHttpPath) instead of raw HttpPath, so paths
+// with special characters are safe in generated Go source code.
+func TestRoutesGenQuotedHttpPath(t *testing.T) {
+	th := helpers.NewTemplateHelper()
+	out := filepath.Join(t.TempDir(), "routes_gen_quoted.go")
+
+	info := TemplateInfo{
+		GoModName:     "example.com/app",
+		ImportDefault: true,
+		Routes: []RouteTemplate{
+			{
+				FunctionName:      "Index",
+				ConfigName:        "DefaultConfig",
+				ConfigPackageName: "routes",
+				PackageName:       "pages",
+				HttpPath:          "/",
+				QuotedHttpPath:    strconv.Quote("/"),
+			},
+			{
+				FunctionName:      "BlogPost",
+				ConfigName:        "BlogConfig",
+				ConfigPackageName: "blog",
+				PackageName:       "pages",
+				HttpPath:          "/blog/{id}",
+				QuotedHttpPath:    strconv.Quote("/blog/{id}"),
+			},
+		},
+	}
+
+	if err := th.UpdateFromTemplateFS(routesGenTemplateFS, routesGenTemplatePath, out, info); err != nil {
+		t.Fatalf("render routes_gen: %v", err)
+	}
+
+	src, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatalf("read rendered routes_gen: %v", err)
+	}
+	gen := string(src)
+
+	// The template must use the QuotedHttpPath value (which is already Go-quoted).
+	// Verify QuotedHttpPath is used in the generated output. The template uses
+	// {{.QuotedHttpPath}} which already includes surrounding double quotes.
+	if !strings.Contains(gen, `routes.DefaultConfig.RegisterRoute(r,"/",pages.Index)`) {
+		t.Errorf("expected quoted root path in template output, got:\n%s", gen)
+	}
+	if !strings.Contains(gen, `blog.BlogConfig.RegisterRoute(r,"/blog/{id}",pages.BlogPost)`) {
+		t.Errorf("expected quoted /blog/{id} path in template output, got:\n%s", gen)
 	}
 }

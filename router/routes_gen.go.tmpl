@@ -19,10 +19,10 @@ import (
 
 func RegisterFileBasedRoutes(r chi.Router) {
 	{{ range .Routes }}
-		{{.ConfigPackageName}}.{{.ConfigName}}.RegisterRoute(r,"{{.HttpPath}}",{{.PackageName}}.{{.FunctionName}})
+		{{.ConfigPackageName}}.{{.ConfigName}}.RegisterRoute(r,{{.QuotedHttpPath}},{{.PackageName}}.{{.FunctionName}})
 	{{ end }}
 	{{ range .ApiRoutes }}
-		{{.ConfigPackageName}}.{{.ConfigName}}.RegisterRoute(r,"{{.HttpPath}}",{{.PackageName}}.{{.FunctionName}})
+		{{.ConfigPackageName}}.{{.ConfigName}}.RegisterRoute(r,{{.QuotedHttpPath}},{{.PackageName}}.{{.FunctionName}})
 	{{ end }}
 
 }

@@ -2,8 +2,11 @@ package helpers
 
 import (
 	"bytes"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
+	"sync"
 	"testing"
 	"time"
 
@@ -419,4 +422,194 @@ func TestSetupDiskServesPublicFolder(t *testing.T) {
 	}
 
 	resetGlobalCache()
+}
+
+// --- LRU MaxEntries tests ---
+
+func TestInMemoryCacheStoreUnboundedByDefault(t *testing.T) {
+	store := NewInMemoryCacheStore(nil)
+
+	// Insert 2000 unique keys into an unbounded store.
+	for i := 0; i < 2000; i++ {
+		key := fmt.Sprintf("key-%d", i)
+		store.Set(key, []byte(key), 0)
+	}
+
+	// All 2000 should be retrievable.
+	for i := 0; i < 2000; i++ {
+		key := fmt.Sprintf("key-%d", i)
+		data, ok := store.Get(key)
+		if !ok {
+			t.Errorf("expected cache hit for %s (unbounded store)", key)
+		}
+		if string(data) != key {
+			t.Errorf("expected %q, got %q", key, string(data))
+		}
+	}
+
+	store.Close()
+}
+
+func TestInMemoryCacheStoreMaxEntriesLRU(t *testing.T) {
+	store := NewInMemoryCacheStore(&CacheConfig{MaxEntries: 3})
+
+	store.Set("a", []byte("a"), 0)
+	store.Set("b", []byte("b"), 0)
+	store.Set("c", []byte("c"), 0)
+	store.Set("d", []byte("d"), 0) // should evict "a" (oldest)
+
+	// "a" should be evicted
+	_, ok := store.Get("a")
+	if ok {
+		t.Error("expected 'a' to be evicted")
+	}
+
+	// "b", "c", "d" should still be present
+	for _, k := range []string{"b", "c", "d"} {
+		data, ok := store.Get(k)
+		if !ok {
+			t.Errorf("expected %q to be present", k)
+		} else if string(data) != k {
+			t.Errorf("expected %q, got %q", k, string(data))
+		}
+	}
+
+	store.Close()
+}
+
+func TestInMemoryCacheStoreLRURefreshOnGet(t *testing.T) {
+	store := NewInMemoryCacheStore(&CacheConfig{MaxEntries: 3})
+
+	store.Set("a", []byte("a"), 0)
+	store.Set("b", []byte("b"), 0)
+	store.Set("c", []byte("c"), 0)
+
+	// Get "a" — promotes it to most-recently-used.
+	store.Get("a")
+
+	store.Set("d", []byte("d"), 0) // should evict "b" (now the least recently used)
+
+	// "b" should be evicted
+	_, ok := store.Get("b")
+	if ok {
+		t.Error("expected 'b' to be evicted")
+	}
+
+	// "a", "c", "d" should be present
+	for _, k := range []string{"a", "c", "d"} {
+		data, ok := store.Get(k)
+		if !ok {
+			t.Errorf("expected %q to be present", k)
+		} else if string(data) != k {
+			t.Errorf("expected %q, got %q", k, string(data))
+		}
+	}
+
+	store.Close()
+}
+
+func TestInMemoryCacheStoreLRUUpdateExisting(t *testing.T) {
+	store := NewInMemoryCacheStore(&CacheConfig{MaxEntries: 3})
+
+	store.Set("a", []byte("a"), 0)
+	store.Set("b", []byte("b"), 0)
+	store.Set("c", []byte("c"), 0)
+
+	// Update "a" — this refreshes its position to most-recently-used.
+	store.Set("a", []byte("updated-a"), 0)
+
+	store.Set("d", []byte("d"), 0) // should evict "b" (now the least recently used)
+
+	// "b" should be evicted
+	_, ok := store.Get("b")
+	if ok {
+		t.Error("expected 'b' to be evicted")
+	}
+
+	// "a" should have the new value
+	data, ok := store.Get("a")
+	if !ok {
+		t.Error("expected 'a' to be present")
+	} else if string(data) != "updated-a" {
+		t.Errorf("expected 'updated-a', got %q", string(data))
+	}
+
+	// "c", "d" should be present
+	for _, k := range []string{"c", "d"} {
+		data, ok := store.Get(k)
+		if !ok {
+			t.Errorf("expected %q to be present", k)
+		}
+		_ = data
+	}
+
+	store.Close()
+}
+
+func TestInMemoryCacheStoreMaxEntriesZeroConfig(t *testing.T) {
+	store := NewInMemoryCacheStore(&CacheConfig{MaxEntries: 0})
+
+	// Insert 2000 unique keys with MaxEntries=0 (should behave as unbounded).
+	for i := 0; i < 2000; i++ {
+		key := fmt.Sprintf("key-%d", i)
+		store.Set(key, []byte(key), 0)
+	}
+
+	// All 2000 should be retrievable.
+	for i := 0; i < 2000; i++ {
+		key := fmt.Sprintf("key-%d", i)
+		data, ok := store.Get(key)
+		if !ok {
+			t.Errorf("expected cache hit for %s (MaxEntries=0 is unbounded)", key)
+		}
+		if string(data) != key {
+			t.Errorf("expected %q, got %q", key, string(data))
+		}
+	}
+
+	store.Close()
+}
+
+// TestInMemoryCacheStoreUnboundedSkipsLRUBookkeeping pins that the default,
+// unbounded store allocates no LRU structures. Maintaining them would cost an
+// element and an index entry per key, plus an exclusive lock on every read, to
+// order a list nothing ever evicts from.
+func TestInMemoryCacheStoreUnboundedSkipsLRUBookkeeping(t *testing.T) {
+	unbounded := NewInMemoryCacheStore(&CacheConfig{})
+	if unbounded.lru != nil || unbounded.lruIndex != nil {
+		t.Error("unbounded store must not allocate LRU structures")
+	}
+	unbounded.Set("a", []byte("1"), 0)
+	if got, ok := unbounded.Get("a"); !ok || string(got) != "1" {
+		t.Errorf("unbounded Get = %q, %v; want \"1\", true", got, ok)
+	}
+
+	bounded := NewInMemoryCacheStore(&CacheConfig{MaxEntries: 2})
+	if bounded.lru == nil || bounded.lruIndex == nil {
+		t.Error("bounded store must allocate LRU structures")
+	}
+}
+
+// TestInMemoryCacheStoreConcurrentReads exercises the shared-lock read path of
+// the unbounded store. Run with -race, it fails if a reader mutates state.
+func TestInMemoryCacheStoreConcurrentReads(t *testing.T) {
+	store := NewInMemoryCacheStore(&CacheConfig{})
+	for i := 0; i < 50; i++ {
+		store.Set(strconv.Itoa(i), []byte(strconv.Itoa(i)), 0)
+	}
+
+	var wg sync.WaitGroup
+	for w := 0; w < 8; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < 200; i++ {
+				if got, ok := store.Get(strconv.Itoa(i % 50)); !ok || string(got) != strconv.Itoa(i%50) {
+					t.Errorf("concurrent Get(%d) = %q, %v", i%50, got, ok)
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
 }
