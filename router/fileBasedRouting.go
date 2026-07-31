@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -484,8 +485,20 @@ func (helper *FileBasedRouteHelper) Render(goModName string) error {
 	helper.RemoveDuplicates()
 	helper.pruneMissingFiles()
 
-	// 5️⃣ Render template
-	return helper.Template.UpdateFromTemplateFS(routesGenTemplateFS, helper.TemplateFile, helper.OutputFile, helper.TemplateInfo)
+	// 5️⃣ Render, and write only when the bytes change. This file is committed in
+	// the user's project and read by the Go build; rewriting it on every cycle
+	// churns its mtime and, before the import sort above, its contents too.
+	rendered, err := helper.Template.RenderToString(routesGenTemplateFS, helper.TemplateFile, helper.TemplateInfo)
+	if err != nil {
+		return err
+	}
+	if existing, readErr := os.ReadFile(helper.OutputFile); readErr == nil && string(existing) == rendered {
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(helper.OutputFile), 0755); err != nil {
+		return err
+	}
+	return os.WriteFile(helper.OutputFile, []byte(rendered), 0644)
 }
 
 func (helper *FileBasedRouteHelper) collectApiRoutesInfo(goModName string) error {
@@ -752,6 +765,12 @@ func (helper *FileBasedRouteHelper) RemoveDuplicates() {
 	for _, imp := range uniqueImports {
 		helper.TemplateInfo.Imports = append(helper.TemplateInfo.Imports, imp)
 	}
+	// Sort by import path. Ranging a map yields a different order on every run,
+	// which reshuffled the import block of the generated file each build: the
+	// file is committed in a user's project, so every build produced a diff.
+	sort.Slice(helper.TemplateInfo.Imports, func(i, j int) bool {
+		return helper.TemplateInfo.Imports[i].PackagePath < helper.TemplateInfo.Imports[j].PackagePath
+	})
 }
 
 func (helper *FileBasedRouteHelper) Initialize(goModName string) {
@@ -759,5 +778,4 @@ func (helper *FileBasedRouteHelper) Initialize(goModName string) {
 	helper.TemplateInfo.Routes = []RouteTemplate{}
 	helper.TemplateInfo.GoModName = goModName
 	helper.TemplateInfo.ImportDefault = false
-	helper.Template.DeleteFile(helper.OutputFile)
 }

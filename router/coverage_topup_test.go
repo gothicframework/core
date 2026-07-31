@@ -418,3 +418,45 @@ func TestFileBasedRouteHelperRender(t *testing.T) {
 		t.Errorf("expected generated file to reference Health api route, got:\n%s", gen)
 	}
 }
+
+// Render must be byte-stable across runs: the generated file is committed in a
+// user's project, and a reshuffled import block showed up as a diff on every
+// build. It must also leave the file untouched when nothing changed, so the
+// build sees a stable mtime.
+func TestRenderIsDeterministicAndWriteIfChanged(t *testing.T) {
+	helper, root := newHelperWithFixtures(t)
+	out := filepath.Join(root, "routes_gen.go")
+
+	if err := helper.Render("example.com/mymod"); err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	first, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatalf("read first render: %v", err)
+	}
+	info, err := os.Stat(out)
+	if err != nil {
+		t.Fatalf("stat first render: %v", err)
+	}
+
+	for i := 0; i < 5; i++ {
+		if err := helper.Render("example.com/mymod"); err != nil {
+			t.Fatalf("Render %d: %v", i, err)
+		}
+		again, err := os.ReadFile(out)
+		if err != nil {
+			t.Fatalf("read render %d: %v", i, err)
+		}
+		if string(again) != string(first) {
+			t.Fatalf("render %d differs from the first:\n--- first ---\n%s\n--- again ---\n%s", i, first, again)
+		}
+	}
+
+	after, err := os.Stat(out)
+	if err != nil {
+		t.Fatalf("stat after re-renders: %v", err)
+	}
+	if !after.ModTime().Equal(info.ModTime()) {
+		t.Errorf("unchanged output was rewritten: mtime %v -> %v", info.ModTime(), after.ModTime())
+	}
+}
