@@ -1,6 +1,6 @@
 // Package corewasm owns the Gothic Framework STATIC CORE artifact: the prebuilt,
 // type-agnostic RPC/registration hub compiled with the framework's pinned TinyGo
-// fork. See wasm/core-runtime for the core's source and the rationale for a
+// toolchain. See wasm/core-runtime for the core's source and the rationale for a
 // single static hub shared by every component on the page.
 //
 // This package is the emission + versioning seam, mirroring gothiccore
@@ -13,8 +13,7 @@
 //	                       the core wasm and the shared exec shim
 //
 // The exec shim is NOT duplicated here — it is served from wasmexec (the same
-// wasm_exec.js per-instance components use), avoiding the earlier 17,732 B
-// duplicate download.
+// wasm_exec.js per-instance components use), avoiding a duplicate download.
 //
 // It is a leaf package (no internal deps) so BOTH the routes bootstrap layer and
 // the wasm build layer can import it without a dependency cycle — same shape as
@@ -28,7 +27,7 @@
 //
 //	go generate ./corewasm
 //
-// The build needs the framework's pinned TinyGo fork on PATH as `tinygo`; set
+// The build needs the framework's pinned TinyGo toolchain on PATH as `tinygo`; set
 // GOTHIC_TINYGO to point at a specific binary instead (the CLI caches one under
 // ~/.cache/gothic-cli/tinygo/tinygo-<version>/<platform>/tinygo/bin/tinygo). The
 // pinned version is the one cli/internal/build.tinyGoVersion names — building

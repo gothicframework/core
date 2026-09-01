@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.6.0 (2026-09-01) - Official TinyGo 0.42.0 runtime
+
+The static core and browser execution shim are built from official TinyGo 0.42.0. Its runtime provides `syscall/js` finalizers, idle-point collection, asyncify stack cleanup, and bounded bridge-slot reclamation without a Gothic-specific compiler fork.
+
+There are no public API or configuration changes. The release gate passed 180 functional, 22 performance, and 2 soak tests against the rebuilt artifacts.
+
 ## v1.6.0-beta.12 (2026-07-28) — Security patch: abort semantics, cache hardening, deploy hardening
 
 **Security fix — upgrade promptly if any route uses `Middleware` to reject a request.** On earlier versions a rejection did not stop the page from rendering. Upgrading is the fix; there is no configuration workaround.
