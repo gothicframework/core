@@ -18,8 +18,8 @@ func TestHTMXStubs_NoOpsDoNotPanic(t *testing.T) {
 		wasm.Delete != "delete" || wasm.None != "none" {
 		t.Error("SwapStrategy consts have unexpected values")
 	}
-	if wasm.EvtAfterSwap != "htmx:afterSwap" || wasm.EvtBeforeRequest != "htmx:beforeRequest" ||
-		wasm.EvtResponseError != "htmx:responseError" || wasm.EvtXHRProgress != "htmx:xhr:progress" ||
+	if wasm.EvtAfterSwap != "htmx:after:swap" || wasm.EvtBeforeRequest != "htmx:before:request" ||
+		wasm.EvtResponseError != "htmx:response:error" || wasm.EvtXHRProgress != "htmx:xhr:progress" ||
 		wasm.EvtValidationValidate != "htmx:validation:validate" {
 		t.Error("HtmxEvent consts have unexpected values")
 	}

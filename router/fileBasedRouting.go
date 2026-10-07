@@ -143,7 +143,19 @@ func (c *wasmInjectedComponent) Render(ctx context.Context, w io.Writer) error {
 	if err := c.inner.Render(ctx, &buf); err != nil {
 		return err
 	}
-	_, err := w.Write(injectWasmEnvelope(buf.Bytes(), c.wasmName, c.compression, c.compiler, c.multiplexed))
+	if TraceHook == nil {
+		_, err := w.Write(injectWasmEnvelope(buf.Bytes(), c.wasmName, c.compression, c.compiler, c.multiplexed))
+		return err
+	}
+	start := time.Now()
+	injected := injectWasmEnvelope(buf.Bytes(), c.wasmName, c.compression, c.compiler, c.multiplexed)
+	traceStage(ctx, TraceEvent{
+		Kind:  "injection",
+		Name:  c.wasmName,
+		MS:    time.Since(start).Milliseconds(),
+		Bytes: len(injected),
+	})
+	_, err := w.Write(injected)
 	return err
 }
 
@@ -168,8 +180,21 @@ func (config *RouteConfig[T]) resolveHandler(httpPath string, component func(T) 
 func (config *RouteConfig[T]) dynamicHandler(component func(T) templ.Component) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// Middleware runs via statusCapture; if it wrote >= 300, abort without rendering.
+		var start time.Time
+		if TraceHook != nil {
+			start = time.Now()
+		}
 		sc := &statusCapture{ResponseWriter: w}
 		middlewareResult := config.Middleware(sc, r)
+		if TraceHook != nil {
+			traceStage(r.Context(), TraceEvent{
+				Kind: "middleware",
+				Name: configTypeName(config.Type),
+				MS:   time.Since(start).Milliseconds(),
+				In:   traceTrunc(r.Method + " " + r.URL.RequestURI()),
+				Out:  traceTrunc(fmt.Sprintf("%v", middlewareResult)),
+			})
+		}
 		if sc.Status() >= 300 {
 			return // DYNAMIC: no warning, no render, no cache
 		}
@@ -178,12 +203,27 @@ func (config *RouteConfig[T]) dynamicHandler(component func(T) templ.Component) 
 }
 
 func (config *RouteConfig[T]) staticHandler(httpPath string, component func(T) templ.Component, store CacheStore, cacheType CacheType) http.HandlerFunc {
+	stageName := configTypeName(config.Type)
 	return func(w http.ResponseWriter, r *http.Request) {
+		traced := TraceHook != nil
 		// CACHE_CONTROL_HEADERS mode: set headers, run middleware, render directly (no store caching)
 		if cacheType == CACHE_CONTROL_HEADERS {
 			w.Header().Set("Cache-Control", "max-age=31536000")
+			var start time.Time
+			if traced {
+				start = time.Now()
+			}
 			sc := &statusCapture{ResponseWriter: w}
 			middlewareResult := config.Middleware(sc, r)
+			if traced {
+				traceStage(r.Context(), TraceEvent{
+					Kind: "middleware",
+					Name: stageName,
+					MS:   time.Since(start).Milliseconds(),
+					In:   traceTrunc(r.Method + " " + r.URL.RequestURI()),
+					Out:  traceTrunc(fmt.Sprintf("%v", middlewareResult)),
+				})
+			}
 			if sc.Status() >= 300 {
 				if sc.Status() >= 400 {
 					warnStaticAuthRejected(httpPath)
@@ -199,12 +239,34 @@ func (config *RouteConfig[T]) staticHandler(httpPath string, component func(T) t
 		if cached, ok := store.Get(key); ok {
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
 			w.Write(cached)
+			if traced {
+				traceStage(r.Context(), TraceEvent{
+					Kind:  "render",
+					Name:  stageName,
+					Cache: "hit",
+					Bytes: len(cached),
+					Out:   traceTrunc(string(cached)),
+				})
+			}
 			return
 		}
 
 		// Cache miss: run middleware via statusCapture; abort on >= 300.
+		var start time.Time
+		if traced {
+			start = time.Now()
+		}
 		sc := &statusCapture{ResponseWriter: w}
 		middlewareResult := config.Middleware(sc, r)
+		if traced {
+			traceStage(r.Context(), TraceEvent{
+				Kind: "middleware",
+				Name: stageName,
+				MS:   time.Since(start).Milliseconds(),
+				In:   traceTrunc(r.Method + " " + r.URL.RequestURI()),
+				Out:  traceTrunc(fmt.Sprintf("%v", middlewareResult)),
+			})
+		}
 		if sc.Status() >= 300 {
 			if sc.Status() >= 400 {
 				warnStaticAuthRejected(httpPath)
@@ -222,19 +284,43 @@ func (config *RouteConfig[T]) staticHandler(httpPath string, component func(T) t
 		store.Set(key, buf.Bytes(), 0)
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Write(buf.Bytes())
+		if traced {
+			traceStage(r.Context(), TraceEvent{
+				Kind:  "render",
+				Name:  stageName,
+				Cache: "miss",
+				Bytes: buf.Len(),
+				Out:   traceTrunc(buf.String()),
+			})
+		}
 	}
 }
 
 func (config *RouteConfig[T]) isrHandler(httpPath string, component func(T) templ.Component, store CacheStore, cacheType CacheType) http.HandlerFunc {
+	stageName := configTypeName(config.Type)
 	return func(w http.ResponseWriter, r *http.Request) {
+		traced := TraceHook != nil
 		// CACHE_CONTROL_HEADERS mode: set headers, run middleware, render directly (no store caching)
 		if cacheType == CACHE_CONTROL_HEADERS {
 			w.Header().Set("Cache-Control", fmt.Sprintf(
 				"max-age=%v, stale-while-revalidate=%v, stale-if-error=%v",
 				config.RevalidateInSec, config.RevalidateInSec, config.RevalidateInSec,
 			))
+			var start time.Time
+			if traced {
+				start = time.Now()
+			}
 			sc := &statusCapture{ResponseWriter: w}
 			middlewareResult := config.Middleware(sc, r)
+			if traced {
+				traceStage(r.Context(), TraceEvent{
+					Kind: "middleware",
+					Name: stageName,
+					MS:   time.Since(start).Milliseconds(),
+					In:   traceTrunc(r.Method + " " + r.URL.RequestURI()),
+					Out:  traceTrunc(fmt.Sprintf("%v", middlewareResult)),
+				})
+			}
 			if sc.Status() >= 300 {
 				if sc.Status() >= 400 {
 					warnStaticAuthRejected(httpPath)
@@ -250,12 +336,34 @@ func (config *RouteConfig[T]) isrHandler(httpPath string, component func(T) temp
 		if cached, ok := store.Get(key); ok {
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
 			w.Write(cached)
+			if traced {
+				traceStage(r.Context(), TraceEvent{
+					Kind:  "render",
+					Name:  stageName,
+					Cache: "hit",
+					Bytes: len(cached),
+					Out:   traceTrunc(string(cached)),
+				})
+			}
 			return
 		}
 
 		// Cache miss: run middleware via statusCapture; abort on >= 300.
+		var start time.Time
+		if traced {
+			start = time.Now()
+		}
 		sc := &statusCapture{ResponseWriter: w}
 		middlewareResult := config.Middleware(sc, r)
+		if traced {
+			traceStage(r.Context(), TraceEvent{
+				Kind: "middleware",
+				Name: stageName,
+				MS:   time.Since(start).Milliseconds(),
+				In:   traceTrunc(r.Method + " " + r.URL.RequestURI()),
+				Out:  traceTrunc(fmt.Sprintf("%v", middlewareResult)),
+			})
+		}
 		if sc.Status() >= 300 {
 			if sc.Status() >= 400 {
 				warnStaticAuthRejected(httpPath)
@@ -274,11 +382,33 @@ func (config *RouteConfig[T]) isrHandler(httpPath string, component func(T) temp
 		store.Set(key, buf.Bytes(), ttl)
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Write(buf.Bytes())
+		if traced {
+			traceStage(r.Context(), TraceEvent{
+				Kind:  "render",
+				Name:  stageName,
+				Cache: "miss",
+				Bytes: buf.Len(),
+				Out:   traceTrunc(buf.String()),
+			})
+		}
 	}
 }
 
 func (config *RouteConfig[T]) Render(r *http.Request, w http.ResponseWriter, component templ.Component) error {
-	return component.Render(r.Context(), w)
+	if TraceHook == nil {
+		return component.Render(r.Context(), w)
+	}
+	start := time.Now()
+	tw := &traceWriter{ResponseWriter: w}
+	err := component.Render(r.Context(), tw)
+	traceStage(r.Context(), TraceEvent{
+		Kind:  "render",
+		Name:  configTypeName(config.Type),
+		MS:    time.Since(start).Milliseconds(),
+		Bytes: tw.written,
+		Out:   traceTrunc(tw.out()),
+	})
+	return err
 }
 
 type ApiRouteConfig struct {
@@ -288,7 +418,7 @@ type ApiRouteConfig struct {
 }
 
 func (config *ApiRouteConfig) RegisterRoute(r chi.Router, httpPath string, fn func(w http.ResponseWriter, r *http.Request)) {
-	handler := config.resolveApiHandler(fn)
+	handler := config.resolveApiHandler(fn, httpPath)
 
 	switch config.HttpMethod {
 	case GET:
@@ -334,25 +464,58 @@ func replayAPIResponse(w http.ResponseWriter, resp cachedAPIResponse) {
 	w.Write(resp.Body)
 }
 
-func (config *ApiRouteConfig) resolveApiHandler(fn func(http.ResponseWriter, *http.Request)) http.HandlerFunc {
+func (config *ApiRouteConfig) resolveApiHandler(fn func(http.ResponseWriter, *http.Request), httpPath string) http.HandlerFunc {
 	switch config.Type {
 	case STATIC:
 		store := getGlobalCacheStore()
 		cacheType := getGlobalCacheType()
-		return config.apiStaticHandler(fn, store, cacheType)
+		return config.apiStaticHandler(fn, httpPath, store, cacheType)
 	case ISR:
 		store := getGlobalCacheStore()
 		cacheType := getGlobalCacheType()
-		return config.apiISRHandler(fn, store, cacheType)
+		return config.apiISRHandler(fn, httpPath, store, cacheType)
 	default:
-		return fn
+		if TraceHook == nil {
+			return fn
+		}
+		// DYNAMIC APIs run bare otherwise, so wrap only for the trace: around
+		// the handler we capture handler time, input payload, and output size.
+		return func(w http.ResponseWriter, r *http.Request) {
+			start := time.Now()
+			in := traceCaptureRequest(r)
+			tw := &traceWriter{ResponseWriter: w}
+			fn(tw, r)
+			traceStage(r.Context(), TraceEvent{
+				Kind:  "api",
+				Name:  configTypeName(config.Type),
+				MS:    time.Since(start).Milliseconds(),
+				Bytes: tw.written,
+				In:    in,
+				Out:   traceTrunc(tw.out()),
+			})
+		}
 	}
 }
 
-func (config *ApiRouteConfig) apiStaticHandler(fn func(http.ResponseWriter, *http.Request), store CacheStore, cacheType CacheType) http.HandlerFunc {
+func (config *ApiRouteConfig) apiStaticHandler(fn func(http.ResponseWriter, *http.Request), httpPath string, store CacheStore, cacheType CacheType) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if cacheType == CACHE_CONTROL_HEADERS {
 			w.Header().Set("Cache-Control", "max-age=31536000")
+			if TraceHook != nil {
+				start := time.Now()
+				in := traceCaptureRequest(r)
+				tw := &traceWriter{ResponseWriter: w}
+				fn(tw, r)
+				traceStage(r.Context(), TraceEvent{
+					Kind:  "api",
+					Name:  configTypeName(config.Type),
+					MS:    time.Since(start).Milliseconds(),
+					Bytes: tw.written,
+					In:    in,
+					Out:   traceTrunc(tw.out()),
+				})
+				return
+			}
 			fn(w, r)
 			return
 		}
@@ -362,11 +525,24 @@ func (config *ApiRouteConfig) apiStaticHandler(fn func(http.ResponseWriter, *htt
 			resp, err := decodeCachedAPIResponse(cached)
 			if err == nil {
 				replayAPIResponse(w, resp)
+				if TraceHook != nil {
+					traceStage(r.Context(), TraceEvent{
+						Kind:  "api",
+						Name:  configTypeName(config.Type),
+						Cache: "hit",
+						Bytes: len(resp.Body),
+						Out:   traceTrunc(string(resp.Body)),
+					})
+				}
 				return
 			}
 		}
 
 		rec := httptest.NewRecorder()
+		var in string
+		if TraceHook != nil {
+			in = traceCaptureRequest(r)
+		}
 		fn(rec, r)
 
 		resp := cachedAPIResponse{
@@ -381,16 +557,41 @@ func (config *ApiRouteConfig) apiStaticHandler(fn func(http.ResponseWriter, *htt
 			}
 		}
 		replayAPIResponse(w, resp)
+		if TraceHook != nil {
+			traceStage(r.Context(), TraceEvent{
+				Kind:  "api",
+				Name:  configTypeName(config.Type),
+				Cache: "miss",
+				Bytes: len(resp.Body),
+				In:    in,
+				Out:   traceTrunc(string(resp.Body)),
+			})
+		}
 	}
 }
 
-func (config *ApiRouteConfig) apiISRHandler(fn func(http.ResponseWriter, *http.Request), store CacheStore, cacheType CacheType) http.HandlerFunc {
+func (config *ApiRouteConfig) apiISRHandler(fn func(http.ResponseWriter, *http.Request), httpPath string, store CacheStore, cacheType CacheType) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if cacheType == CACHE_CONTROL_HEADERS {
 			w.Header().Set("Cache-Control", fmt.Sprintf(
 				"max-age=%v, stale-while-revalidate=%v, stale-if-error=%v",
 				config.RevalidateInSec, config.RevalidateInSec, config.RevalidateInSec,
 			))
+			if TraceHook != nil {
+				start := time.Now()
+				in := traceCaptureRequest(r)
+				tw := &traceWriter{ResponseWriter: w}
+				fn(tw, r)
+				traceStage(r.Context(), TraceEvent{
+					Kind:  "api",
+					Name:  configTypeName(config.Type),
+					MS:    time.Since(start).Milliseconds(),
+					Bytes: tw.written,
+					In:    in,
+					Out:   traceTrunc(tw.out()),
+				})
+				return
+			}
 			fn(w, r)
 			return
 		}
@@ -400,11 +601,24 @@ func (config *ApiRouteConfig) apiISRHandler(fn func(http.ResponseWriter, *http.R
 			resp, err := decodeCachedAPIResponse(cached)
 			if err == nil {
 				replayAPIResponse(w, resp)
+				if TraceHook != nil {
+					traceStage(r.Context(), TraceEvent{
+						Kind:  "api",
+						Name:  configTypeName(config.Type),
+						Cache: "hit",
+						Bytes: len(resp.Body),
+						Out:   traceTrunc(string(resp.Body)),
+					})
+				}
 				return
 			}
 		}
 
 		rec := httptest.NewRecorder()
+		var in string
+		if TraceHook != nil {
+			in = traceCaptureRequest(r)
+		}
 		fn(rec, r)
 
 		ttl := time.Duration(config.RevalidateInSec) * time.Second
@@ -420,6 +634,16 @@ func (config *ApiRouteConfig) apiISRHandler(fn func(http.ResponseWriter, *http.R
 			}
 		}
 		replayAPIResponse(w, resp)
+		if TraceHook != nil {
+			traceStage(r.Context(), TraceEvent{
+				Kind:  "api",
+				Name:  configTypeName(config.Type),
+				Cache: "miss",
+				Bytes: len(resp.Body),
+				In:    in,
+				Out:   traceTrunc(string(resp.Body)),
+			})
+		}
 	}
 }
 

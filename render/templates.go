@@ -27,36 +27,6 @@ type RouteTemplateInfo struct {
 	GoModName     string
 }
 
-type EnvValueInfo struct {
-	Value        interface{}
-	Key          string // Lambda env var name (spaces replaced with underscores)
-	SanitizedKey string // Alphanumeric-only key for CloudFormation Mappings lookups
-}
-type StageTemplateInfo struct {
-	Name                  string
-	BucketName            string
-	LambdaName            string
-	CustomDomain          string
-	HostedZone            string
-	CertificateArn        string
-	IsCustomDomainWithArn bool
-	IsCustomDomain        bool
-	WafArn                string
-	Env                   []EnvValueInfo
-}
-
-type SamYamlTemplateInfo struct {
-	Timeout           int
-	MemorySize        int
-	UsedTemplateName  string
-	ProjectName       string
-	StageTemplateInfo StageTemplateInfo
-}
-type SamTomlTemplateInfo struct {
-	StackName string
-	AwsRegion string
-}
-
 type TemplateHelper struct {
 	InitCmdTemplateInfo InitCmdTemplateInfo
 	RouteTemplateInfo   RouteTemplateInfo

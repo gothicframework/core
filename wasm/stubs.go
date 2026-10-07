@@ -328,13 +328,13 @@ func AddEventListenerWithEvent(el JSValue, event string, fn func(JSValue)) {}
 // The listener stays alive for the lifetime of the page — it is never removed automatically.
 //
 // Common use cases: reacting to browser events (click, input, toggle) or framework
-// events (htmx:afterSwap, htmx:beforeSwap) on any JSValue element including Document()
+// events (htmx:after:swap, htmx:before:swap) on any JSValue element including Document()
 // and Window().
 //
 // Example:
 //
 //	body := Document().Get("body")
-//	AddEventListener(body, "htmx:afterSwap", func() {
+//	AddEventListener(body, "htmx:after:swap", func() {
 //	    // re-sync DOM after HTMX swaps content
 //	})
 //
@@ -691,31 +691,63 @@ const (
 	None        SwapStrategy = "none"        // do not append the response content
 )
 
-// HtmxEvent is a string-backed htmx event name. The consts are the full htmx
-// 2.0.3 event catalog; a custom/extension event is reachable via a string cast,
-// e.g. HtmxEvent("htmx:sse:message").
+// HtmxEvent is a string-backed htmx event name. The consts below are the
+// htmx 4.0 event surface of the port (renamed events keep their Go name and
+// point at the 4.0 event string; constants whose event the 4.0 core no longer
+// dispatches keep their legacy string and are marked as inert). A custom or
+// extension event stays reachable via a string cast, e.g.
+// HtmxEvent("htmx:sse:message").
 type HtmxEvent string
 
 const (
-	EvtAbort                     HtmxEvent = "htmx:abort"
-	EvtAfterOnLoad               HtmxEvent = "htmx:afterOnLoad"
-	EvtAfterProcessNode          HtmxEvent = "htmx:afterProcessNode"
-	EvtAfterRequest              HtmxEvent = "htmx:afterRequest"
-	EvtAfterSettle               HtmxEvent = "htmx:afterSettle"
-	EvtAfterSwap                 HtmxEvent = "htmx:afterSwap"
+	EvtAbort          HtmxEvent = "htmx:abort"
+	EvtAfterRequest   HtmxEvent = "htmx:after:request"
+	EvtAfterSettle    HtmxEvent = "htmx:after:settle"
+	EvtAfterSwap      HtmxEvent = "htmx:after:swap"
+	EvtBeforeRequest  HtmxEvent = "htmx:before:request"
+	EvtBeforeSwap     HtmxEvent = "htmx:before:swap"
+	EvtConfigRequest  HtmxEvent = "htmx:config:request"
+	EvtConfirm        HtmxEvent = "htmx:confirm"
+	EvtError          HtmxEvent = "htmx:error"
+	EvtFinallyRequest HtmxEvent = "htmx:finally:request"
+	EvtFinallySwap    HtmxEvent = "htmx:finally:swap"
+	EvtPrompt         HtmxEvent = "htmx:prompt"
+	EvtTrigger        HtmxEvent = "htmx:trigger"
+	EvtBeforeResponse HtmxEvent = "htmx:before:response"
+	EvtResponseError  HtmxEvent = "htmx:response:error"
+
+	// Element lifecycle (htmx 4.0 names; the htmx 2 process/load-family events
+	// were renamed or dropped in 4.0 and the Go names keep working).
+	EvtBeforeInit    HtmxEvent = "htmx:before:init"
+	EvtAfterInit     HtmxEvent = "htmx:after:init"
+	EvtBeforeProcess HtmxEvent = "htmx:before:process"
+	EvtAfterProcess  HtmxEvent = "htmx:after:process"
+
+	// Cleanup / history (renamed in 4.0).
+	EvtBeforeCleanup        HtmxEvent = "htmx:before:cleanup"
+	EvtAfterCleanup         HtmxEvent = "htmx:after:cleanup"
+	EvtBeforeHistoryUpdate  HtmxEvent = "htmx:before:history:update"
+	EvtAfterHistoryPush     HtmxEvent = "htmx:after:history:push"
+	EvtAfterHistoryReplace  HtmxEvent = "htmx:after:history:replace"
+	EvtBeforeHistoryRestore HtmxEvent = "htmx:before:history:restore"
+
+	// Renamed but kept under their 2.x Go names (aliases of the replacements).
+	EvtAfterProcessNode     HtmxEvent = "htmx:after:init"
+	EvtBeforeProcessNode    HtmxEvent = "htmx:before:init"
+	EvtAfterOnLoad          HtmxEvent = "htmx:after:request"
+	EvtBeforeOnLoad         HtmxEvent = "htmx:before:response"
+	EvtBeforeCleanupElement HtmxEvent = "htmx:before:cleanup"
+	EvtHistoryRestore       HtmxEvent = "htmx:before:history:restore"
+	EvtPushedIntoHistory    HtmxEvent = "htmx:after:history:push"
+	EvtReplacedInHistory    HtmxEvent = "htmx:after:history:replace"
+	EvtResponseErrorLegacy  HtmxEvent = "htmx:response:error"
+	EvtBeforeSend           HtmxEvent = "htmx:before:request"
+
+	// Inert in 4.0 (the event no longer fires; the constant remains so old code
+	// compiles, and its string matches nothing the port dispatches).
 	EvtBadResponseURL            HtmxEvent = "htmx:badResponseUrl"
-	EvtBeforeCleanupElement      HtmxEvent = "htmx:beforeCleanupElement"
 	EvtBeforeHistorySave         HtmxEvent = "htmx:beforeHistorySave"
-	EvtBeforeHistoryUpdate       HtmxEvent = "htmx:beforeHistoryUpdate"
-	EvtBeforeOnLoad              HtmxEvent = "htmx:beforeOnLoad"
-	EvtBeforeProcessNode         HtmxEvent = "htmx:beforeProcessNode"
-	EvtBeforeRequest             HtmxEvent = "htmx:beforeRequest"
-	EvtBeforeSend                HtmxEvent = "htmx:beforeSend"
-	EvtBeforeSwap                HtmxEvent = "htmx:beforeSwap"
 	EvtBeforeTransition          HtmxEvent = "htmx:beforeTransition"
-	EvtConfigRequest             HtmxEvent = "htmx:configRequest"
-	EvtConfirm                   HtmxEvent = "htmx:confirm"
-	EvtError                     HtmxEvent = "htmx:error"
 	EvtEvalDisallowedError       HtmxEvent = "htmx:evalDisallowedError"
 	EvtEventFilterError          HtmxEvent = "htmx:eventFilter:error"
 	EvtHistoryCacheError         HtmxEvent = "htmx:historyCacheError"
@@ -723,17 +755,12 @@ const (
 	EvtHistoryCacheMissLoad      HtmxEvent = "htmx:historyCacheMissLoad"
 	EvtHistoryCacheMissLoadError HtmxEvent = "htmx:historyCacheMissLoadError"
 	EvtHistoryItemCreated        HtmxEvent = "htmx:historyItemCreated"
-	EvtHistoryRestore            HtmxEvent = "htmx:historyRestore"
 	EvtInvalidPath               HtmxEvent = "htmx:invalidPath"
 	EvtLoad                      HtmxEvent = "htmx:load"
 	EvtOnLoadError               HtmxEvent = "htmx:onLoadError"
 	EvtOobAfterSwap              HtmxEvent = "htmx:oobAfterSwap"
 	EvtOobBeforeSwap             HtmxEvent = "htmx:oobBeforeSwap"
 	EvtOobErrorNoTarget          HtmxEvent = "htmx:oobErrorNoTarget"
-	EvtPrompt                    HtmxEvent = "htmx:prompt"
-	EvtPushedIntoHistory         HtmxEvent = "htmx:pushedIntoHistory"
-	EvtReplacedInHistory         HtmxEvent = "htmx:replacedInHistory"
-	EvtResponseError             HtmxEvent = "htmx:responseError"
 	EvtRestored                  HtmxEvent = "htmx:restored"
 	EvtSendAbort                 HtmxEvent = "htmx:sendAbort"
 	EvtSendError                 HtmxEvent = "htmx:sendError"
@@ -741,7 +768,6 @@ const (
 	EvtSyntaxError               HtmxEvent = "htmx:syntax:error"
 	EvtTargetError               HtmxEvent = "htmx:targetError"
 	EvtTimeout                   HtmxEvent = "htmx:timeout"
-	EvtTrigger                   HtmxEvent = "htmx:trigger"
 	EvtValidateURL               HtmxEvent = "htmx:validateUrl"
 	EvtValidationValidate        HtmxEvent = "htmx:validation:validate"
 	EvtValidationFailed          HtmxEvent = "htmx:validation:failed"

@@ -11,7 +11,7 @@ func TestHTMXRuntimeStubs_NoOpsDoNotPanic(t *testing.T) {
 	if InnerHTML != "innerHTML" || None != "none" || Delete != "delete" {
 		t.Error("SwapStrategy consts have unexpected values")
 	}
-	if EvtBeforeSwap != "htmx:beforeSwap" || EvtXHRLoadend != "htmx:xhr:loadend" {
+	if EvtBeforeSwap != "htmx:before:swap" || EvtXHRLoadend != "htmx:xhr:loadend" {
 		t.Error("HtmxEvent consts have unexpected values")
 	}
 

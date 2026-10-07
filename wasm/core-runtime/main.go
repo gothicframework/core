@@ -61,9 +61,9 @@ package main
 import (
 	"syscall/js"
 
-	htmx "github.com/gothicframework/htmx-go/v2"
-	preload "github.com/gothicframework/htmx-go/v2/ext/preload"
-	sigv4 "github.com/gothicframework/htmx-go/v2/ext/sigv4"
+	htmx "github.com/gothicframework/htmx-go/v4"
+	preload "github.com/gothicframework/htmx-go/v4/ext/preload"
+	sigv4 "github.com/gothicframework/htmx-go/v4/ext/sigv4"
 
 	"github.com/gothicframework/core/wasm/core-runtime/protocol"
 )
@@ -329,7 +329,7 @@ func main() {
 	htmx.Install()
 
 	// Register the AWS SigV4 body-hash signer as an IN-PATH request transformer.
-	// It runs inside htmx's request pipeline (after htmx:configRequest, before
+	// It runs inside htmx's request pipeline (after htmx:config:request, before
 	// xhr.send) and sets x-amz-content-sha256 on every request that carries a body,
 	// so an unsigned request is impossible by control flow (no racing listener, no
 	// boot shim). It is RUNTIME-gated: Register reads the server-rendered
@@ -362,7 +362,7 @@ func main() {
 	global.Set(glReady, js.ValueOf(true))
 	announceOnline(global, doc)
 
-	// Run htmx's document processing pass (processNode(body) + htmx:load). This is
+	// Run htmx's document processing pass (processNode(body) → htmx:after:process). This is
 	// deliberately deferred until AFTER the core marks itself ready and announces
 	// online: htmx installs its listeners synchronously and then walks the DOM, and
 	// running that walk before the announce would let it synchronously re-enter an

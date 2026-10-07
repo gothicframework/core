@@ -3,7 +3,7 @@ package runtime
 import (
 	"testing"
 
-	"github.com/gothicframework/htmx-go/v2/ext/sigv4"
+	"github.com/gothicframework/htmx-go/v4/ext/sigv4"
 )
 
 func TestShouldSignFetch(t *testing.T) {
