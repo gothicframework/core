@@ -12,7 +12,7 @@ This module (`github.com/gothicframework/core`) is the **runtime library** a Got
 > You don't add `core` to a project by hand. Install the **[`gothic` CLI](https://github.com/gothicframework/cli)** and run `gothic init` — it scaffolds a project that imports `core` (plus [`components`](https://github.com/gothicframework/components) and [`middlewares`](https://github.com/gothicframework/middlewares)) at the right versions.
 >
 > ```bash
-> go install github.com/gothicframework/cli/v3/cmd/gothic@latest
+> go install github.com/gothicframework/cli/v4/cmd/gothic@latest
 > gothic init github.com/you/my-app
 > ```
 
