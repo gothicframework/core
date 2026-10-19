@@ -18,7 +18,7 @@ type Config struct {
 	// Empty uses the bundled default. See cli/docs/patched-tinygo-channel.md.
 	WasmTinyGoVersion string
 	TailwindBinary    string
-	OptimizeImages OptimizeImagesConfig
+	OptimizeImages    OptimizeImagesConfig
 	// Runtime is the routing/caching configuration the generated main.go hands to
 	// gothicServer.Middleware. It is read at runtime (not by the CLI's config
 	// parser), and its zero value is the default behavior, so it may be omitted.
@@ -44,9 +44,10 @@ type OptimizeImagesConfig struct {
 type Provider int
 
 const (
-	// AWS is the only provider supported in v3. It is the zero value, so a
-	// DeployConfig that omits Provider deploys to AWS.
+	// AWS is the zero value, so a DeployConfig that omits Provider deploys to AWS.
 	AWS Provider = iota
+	// GCP is Google Cloud Platform: Cloud Run, Artifact Registry and GCS.
+	GCP Provider = iota
 )
 
 // DeployConfig selects a deploy provider and holds the per-provider settings.
@@ -64,6 +65,8 @@ type DeployConfig struct {
 // future providers (e.g. GCP, Azure) are added here as additional value fields.
 type Providers struct {
 	AWS AWSProvider
+	// GCP holds the Google Cloud Platform deploy settings.
+	GCP GCPProvider
 }
 
 // AWSProvider holds the AWS-specific deploy settings and per-stage configuration.
